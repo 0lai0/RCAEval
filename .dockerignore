@@ -1,0 +1,49 @@
+# Git 相關
+.git
+.gitignore
+
+# 文檔和範例（保留 README.md）
+docs/
+legacy/
+.circleci/
+.github/
+
+# Python 相關
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+env-rcd/
+venv/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# 資料和結果
+data/
+results/
+*.csv
+*.json
+*.zip
+
+# IDE 和編輯器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 測試和覆蓋率
+.coverage
+.pytest_cache/
+.tox/
+
+# Docker 相關
+Dockerfile
+docker-compose.yml
+.dockerignore

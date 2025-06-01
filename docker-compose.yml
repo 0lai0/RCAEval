@@ -1,0 +1,84 @@
+services:
+  rcaeval:
+    build: .
+    container_name: rcaeval-default
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./RCAEval:/app/RCAEval
+      - ./docs:/app/docs
+      - ./tests:/app/tests
+      - ./script:/app/script
+      - ./main.py:/app/main.py
+    environment:
+      - PYTHONPATH=/app
+      - TZ=Asia/Taipei
+    stdin_open: true
+    tty: true
+    working_dir: /app
+    restart: unless-stopped
+    command: /bin/bash -c "source env/bin/activate && echo 'RCAEval default environment (Python 3.10) ready!' && tail -f /dev/null"
+
+  rcaeval-rcd:
+    build: .
+    container_name: rcaeval-rcd
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./RCAEval:/app/RCAEval
+      - ./docs:/app/docs
+      - ./tests:/app/tests
+      - ./script:/app/script
+      - ./main.py:/app/main.py
+    environment:
+      - PYTHONPATH=/app
+      - TZ=Asia/Taipei
+    stdin_open: true
+    tty: true
+    working_dir: /app
+    restart: unless-stopped
+    command: /bin/bash -c "source env-rcd/bin/activate && echo 'RCAEval RCD environment (Python 3.8) ready!' && tail -f /dev/null"
+
+  rcaeval-jupyter:
+    build: .
+    container_name: rcaeval-jupyter
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./RCAEval:/app/RCAEval
+      - ./docs:/app/docs
+      - ./tests:/app/tests
+      - ./script:/app/script
+      - ./main.py:/app/main.py
+    environment:
+      - PYTHONPATH=/app
+      - TZ=Asia/Taipei
+    ports:
+      - "8888:8888"
+    working_dir: /app
+    restart: unless-stopped
+    command: /bin/bash -c "source env/bin/activate && pip install jupyter && jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
+
+  rcaeval-api:
+    build: .
+    container_name: rcaeval-api
+    volumes:
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./RCAEval:/app/RCAEval
+      - ./docs:/app/docs
+      - ./tests:/app/tests
+      - ./script:/app/script
+      - ./main.py:/app/main.py
+    environment:
+      - PYTHONPATH=/app
+      - TZ=Asia/Taipei
+    ports:
+      - "8080:8080"
+    working_dir: /app
+    restart: unless-stopped
+    command: /bin/bash -c "source env/bin/activate && echo 'RCAEval API service ready on port 8080' && python -m http.server 8080"
+
+volumes:
+  rcaeval-data:
+  rcaeval-results:
