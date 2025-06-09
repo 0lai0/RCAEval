@@ -324,7 +324,13 @@ for service in services:
                 continue  # ignore
 
             for i, ranks in data.items():
-                s_ranks = [Node(x.split("_")[0].replace("-db", ""), "unknown") for x in ranks]
+                # Handle ranks that may not follow the expected format
+                s_ranks = []
+                for x in ranks:
+                    parts = x.split("_")
+                    service_name = parts[0].replace("-db", "")
+                    s_ranks.append(Node(service_name, "unknown"))
+                
                 # remove duplication
                 old_s_ranks = s_ranks.copy()
                 s_ranks = (
@@ -338,7 +344,18 @@ for service in services:
                     else []
                 )
 
-                f_ranks = [Node(x.split("_")[0], x.split("_")[1]) for x in ranks]
+                # Handle ranks for full metric-level evaluation
+                f_ranks = []
+                for x in ranks:
+                    parts = x.split("_")
+                    if len(parts) >= 2:
+                        service_name = parts[0]
+                        metric_name = parts[1]
+                    else:
+                        # If no underscore or only one part, treat as service with unknown metric
+                        service_name = parts[0]
+                        metric_name = "unknown"
+                    f_ranks.append(Node(service_name, metric_name))
 
                 s_evaluator.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                 f_evaluator.add_case(ranks=f_ranks, answer=Node(service, fault))
