@@ -46,6 +46,7 @@ if is_py310():
     from .microcause import microcause
     from .microrank import microrank
     from .easyrca import easyrca
+    from .mulan import mulan
     from .pc_pagerank import cmlp_pagerank, ntlr_pagerank, pc_pagerank
     from .pc_randomwalk import (
         fci_randomwalk,

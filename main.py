@@ -55,6 +55,7 @@ if is_py310():
         microcause,
         microrank,
         mscred,
+        mulan,
         nsigma,
         ntlr_pagerank,
         ntlr_randomwalk,
