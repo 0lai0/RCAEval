@@ -33,6 +33,8 @@ from RCAEval.utility import (
     download_re3_dataset, 
 )
 
+# 直接從 baro 模組導入多模態方法
+from RCAEval.e2e.baro import mmbaro, mmnsigma
 
 if is_py310():
     from RCAEval.e2e import (
@@ -49,6 +51,7 @@ if is_py310():
         ges_pagerank,
         granger_pagerank,
         granger_randomwalk,
+        labrca,
         lingam_pagerank,
         lingam_randomwalk,
         micro_diag,
@@ -63,6 +66,7 @@ if is_py310():
         run,
         tracerca,
     )
+    from RCAEval.e2e.svmrca import svmrca  # 直接導入函數
 
 elif is_py38():
     from RCAEval.e2e import dummy, e_diagnosis, ht, rcd, mmrcd
@@ -81,10 +85,30 @@ except ImportError:
 def parse_args():
     parser = argparse.ArgumentParser(description="RCAEval evaluation")
     parser.add_argument("--method", type=str, help="Choose a method.")
-    parser.add_argument("--dataset", type=str, help="Choose a dataset.", choices=[
-        "online-boutique", "sock-shop-1", "sock-shop-2", "train-ticket",
-        "re1-ob", "re1-ss", "re1-tt", "re2-ob", "re2-ss", "re2-tt", "re3-ob", "re3-ss", "re3-tt"
-    ])
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="train-ticket",
+        choices=[
+            "online-boutique",
+            "sock-shop-1",
+            "sock-shop-2",
+            "train-ticket",
+            "re1-ob",
+            "re1-ss",
+            "re1-tt",
+            "re2-ob",
+            "re2-ss",
+            "re2-tt",
+            "re3-ob",
+            "re3-ss",
+            "re3-tt",
+            "mm-tt",  # 多模態 train-ticket
+            "mm-ob",  # 多模態 online-boutique
+            "mm-ss",  # 多模態 sock-shop
+        ],
+        help="Dataset to use",
+    )
     parser.add_argument("--length", type=int, default=20, help="Time series length (RQ4)")
     parser.add_argument("--tdelta", type=int, default=0, help="Specify $t_delta$ to simulate delay in anomaly detection")
     parser.add_argument("--test", action="store_true", help="Perform smoke test on certain methods without fully run on all data")
@@ -127,7 +151,10 @@ DATASET_MAP = {
     "re2-tt": "data/RE2/RE2-TT",
     "re3-ob": "data/RE3/RE3-OB",
     "re3-ss": "data/RE3/RE3-SS",
-    "re3-tt": "data/RE3/RE3-TT"
+    "re3-tt": "data/RE3/RE3-TT",
+    "mm-tt": "data/mm-tt",
+    "mm-ob": "data/mm-ob",
+    "mm-ss": "data/mm-ss"
 }
 dataset = DATASET_MAP[args.dataset]
 
@@ -136,15 +163,10 @@ dataset = DATASET_MAP[args.dataset]
 data_paths = list(glob.glob(os.path.join(dataset, "**/data.csv"), recursive=True))
 if not data_paths: 
     data_paths = list(glob.glob(os.path.join(dataset, "**/simple_metrics.csv"), recursive=True))
-# new_data_paths = []
-# for p in data_paths: 
-#     if os.path.exists(p.replace("data.csv", "simple_data.csv")):
-#         new_data_paths.append(p.replace("data.csv", "simple_data.csv"))
-#     elif os.path.exists(p.replace("data.csv", "simple_metrics.csv")):
-#         new_data_paths.append(p.replace("data.csv", "simple_metrics.csv"))
-#     else:
-#         new_data_paths.append(p)
-# data_paths = new_data_paths
+
+if not data_paths:
+    raise Exception(f"No data files found in {dataset}. Please make sure the dataset is downloaded correctly.")
+
 if args.test is True:
     data_paths = data_paths[:2]
 
@@ -177,6 +199,16 @@ def process(data_path):
 
     # == Load and Preprocess data ==
     data = pd.read_csv(data_path)
+    
+    # 載入日誌數據 (對於 RE3 數據集)
+    logs = None
+    if "re3" in args.dataset.lower():
+        logs_path = join(data_dir, "logs.csv")
+        if os.path.exists(logs_path):
+            logs = pd.read_csv(logs_path)
+            print(f"[Main] load logs: {logs.shape[0]} records")
+        else:
+            print(f"[Main] warning: RE3 dataset not found logs file {logs_path}")
     
     # remove lat-50, only selecte lat-90 
     data = data.loc[:, ~data.columns.str.endswith("_latency-50")]
@@ -223,11 +255,11 @@ def process(data_path):
         sli = "front-end_cpu"
         if f"{service}_lat_90" in data:
             sli = f"{service}_lat_90"
-    elif "train-ticket" in data_path or "fse-tt" in data_path or "RE2-TT" in data_path:
+    elif "train-ticket" in data_path or "fse-tt" in data_path or "RE2-TT" in data_path or "RE3-TT" in data_path:
         sli = "ts-ui-dashboard_latency"
         if f"{service}_latency" in data:
             sli = f"{service}_latency"
-    elif "online-boutique" in data_path or "fse-ob" in data_path or "RE2-OB" in data_path or "RE2-SS" in data_path:
+    elif "online-boutique" in data_path or "fse-ob" in data_path or "RE2-OB" in data_path or "RE2-SS" in data_path or "RE3-OB" in data_path or "RE3-SS" in data_path:
         sli = "frontend_latency"
         if f"{service}_latency" in data:
             sli = f"{service}_latency"
@@ -252,6 +284,7 @@ def process(data_path):
             verbose=False,
             n_iter=num_node,
             args=run_args,
+            logs=logs,
         )
         root_causes = out.get("ranks")
         # print("==============")
@@ -308,6 +341,9 @@ s_evaluator_io = Evaluator()
 f_evaluator_io = Evaluator()
 s_evaluator_socket = Evaluator()
 f_evaluator_socket = Evaluator()
+# 添加 RE3 code-level 故障類型的評估器
+s_evaluator_code = Evaluator()
+f_evaluator_code = Evaluator()
 
 for service in services:
     for fault in faults:
@@ -400,6 +436,14 @@ for service in services:
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "socket"))
+                
+                # RE3 code-level 故障類型 (f1, f2, f3, f4, f5)
+                elif fault.startswith("f") and fault[1:].isdigit():
+                    s_evaluator_code.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
+                    f_evaluator_code.add_case(ranks=f_ranks, answer=Node(service, fault))
+
+                    s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
+                    f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, fault))
 
 
         eval_data["service-fault"].append(f"{service}_{fault}")
@@ -421,6 +465,7 @@ for name, s_evaluator, f_evaluator in [
     ("socket", s_evaluator_socket, f_evaluator_socket),
     ("delay", s_evaluator_lat, f_evaluator_lat),
     ("loss", s_evaluator_loss, f_evaluator_loss),
+    ("code", s_evaluator_code, f_evaluator_code),  # 添加 code-level 評估
 ]:
     eval_data["service-fault"].append(f"overall_{name}")
     eval_data["top_1_service"].append(s_evaluator.accuracy(1))
@@ -436,8 +481,7 @@ for name, s_evaluator, f_evaluator in [
         name = "disk"
 
     if s_evaluator.average(5) is not None:
-        print( f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
-
+        print(f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
 
 print("---")
 print("Avg speed:", avg_speed)

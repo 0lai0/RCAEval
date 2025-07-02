@@ -17,7 +17,6 @@ from RCAEval.io.time_series import (
 )
 from RCAEval.utility import is_py310
 
-
 def rca(func):
     """RCA Wrapper to tolerate the case when the RCA algorithm fails."""
     def wrapper(*args, **kwargs):
@@ -29,6 +28,10 @@ def rca(func):
             dummy = data.columns.to_list()
             return {"adj": [], "node_names": dummy, "ranks": dummy}
     return wrapper
+
+# Import labrca after defining rca decorator
+from .labrca import labrca
+labrca = rca(labrca)  # Apply the decorator
 
 if is_py310():
     try:
