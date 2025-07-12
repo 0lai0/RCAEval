@@ -37,6 +37,9 @@ from RCAEval.utility import (
 if is_py310():
     from RCAEval.e2e import (
         baro,
+        borca,
+        borca_multimodal,
+        mmorca,
         causalrca,
         circa,
         cloudranger,
