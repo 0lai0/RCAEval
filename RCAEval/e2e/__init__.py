@@ -36,6 +36,30 @@ if is_py310():
     except Exception as e:
         pass
     from .baro import baro, mmbaro, mmnsigma
+    try:
+        from .mmrca import mmrca, mmbaro_mmrca, mmnsigma_mmrca
+    except Exception as e:
+        print(f"Warning: Could not import mmrca methods: {e}")
+        # Define dummy functions to prevent import errors
+        def mmrca(*args, **kwargs):
+            return {"adj": [], "node_names": [], "ranks": []}
+        def mmbaro_mmrca(*args, **kwargs):
+            return {"adj": [], "node_names": [], "ranks": []}
+        def mmnsigma_mmrca(*args, **kwargs):
+            return {"adj": [], "node_names": [], "ranks": []}
+    try:
+        from .mmrca_split import (
+            MMRCAOfflineTrainer, 
+            MMRCAOnlineAnalyzer,
+            mmrca_train_offline,
+            mmrca_analyze_online,
+            mmrca_split
+        )
+    except Exception as e:
+        print(f"Warning: Could not import mmrca_split methods: {e}")
+        # Define dummy functions to prevent import errors
+        def mmrca_split(*args, **kwargs):
+            return {"adj": [], "node_names": [], "ranks": []}
     from .causalrca import causalrca
     from .circa import circa
     from .cloudranger import cloudranger

@@ -54,6 +54,10 @@ if is_py310():
         micro_diag,
         microcause,
         microrank,
+        mmrca,
+        mmbaro_mmrca,
+        mmnsigma_mmrca,
+        mmrca_split,
         mscred,
         nsigma,
         ntlr_pagerank,
@@ -254,6 +258,20 @@ def process(data_path):
             args=run_args,
         )
         root_causes = out.get("ranks")
+
+        # --- 輸出 causal_graph_snapshot ---
+        if "causal_graph_snapshot" in out and out["causal_graph_snapshot"] is not None:
+            causal_graph = out["causal_graph_snapshot"]
+            if causal_graph.number_of_edges() > 0:
+                print(f"\n--- Causal Graph Snapshot for {basename(data_path)} ---")
+                print(f"圖的節點數量: {causal_graph.number_of_nodes()}")
+                print(f"圖的邊數量: {causal_graph.number_of_edges()}")
+                print("\n邊列表 (From -> To, Weight):")
+                for u, v, edge_data in causal_graph.edges(data=True):
+                    weight_info = f" (Weight: {edge_data.get('weight', 'N/A'):.4f})" if 'weight' in edge_data else ""
+                    print(f"{u} -> {v}{weight_info}")
+                print("--- End of Causal Graph Snapshot ---\n")
+
         # print("==============")
         # print(f"{data_path=}")
         # print(root_causes[:5])
