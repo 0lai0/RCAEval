@@ -41,6 +41,7 @@ if is_py310():
         circa,
         cloudranger,
         cmlp_pagerank,
+        cpg,
         dummy,
         e_diagnosis,
         easyrca,

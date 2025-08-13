@@ -39,6 +39,7 @@ if is_py310():
     from .causalrca import causalrca
     from .circa import circa
     from .cloudranger import cloudranger
+    from .cpg import cpg
     from .fci_pagerank import fci_pagerank
     from .ges_pagerank import ges_pagerank
     from .granger_pagerank import granger_pagerank
