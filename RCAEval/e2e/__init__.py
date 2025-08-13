@@ -42,6 +42,7 @@ if is_py310():
     from .fci_pagerank import fci_pagerank
     from .ges_pagerank import ges_pagerank
     from .granger_pagerank import granger_pagerank
+    from .grumvgc import grumvgc
     from .lingam_pagerank import lingam_pagerank, micro_diag
     from .microcause import microcause
     from .microrank import microrank
