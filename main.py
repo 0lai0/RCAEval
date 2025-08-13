@@ -49,7 +49,6 @@ if is_py310():
         ges_pagerank,
         granger_pagerank,
         granger_randomwalk,
-        grumvgc,
         lingam_pagerank,
         lingam_randomwalk,
         micro_diag,
