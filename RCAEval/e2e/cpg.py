@@ -12,28 +12,28 @@ from scipy import stats
 from scipy.optimize import minimize
 import networkx as nx
 
-# 导入RCAEval现有工具
+# 導入RCAEval現有工具
 from RCAEval.io.time_series import preprocess, drop_constant
 from RCAEval.e2e import rca
 
-# 设置日志
+# 設置日誌
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @dataclass
 class AtomicEvent:
-    """原子事件 E = (t, N, T, D)"""
-    t: int  # Unix ms 时间戳
-    N: str  # 服务节点标识
-    T: str  # 事件类型
+    """meta event事件 E = (t, N, T, D)"""
+    t: int  # Unix ms 時間戳
+    N: str  # 服務節點標識
+    T: str  # 事件類型
     D: Dict[str, Any]  # Payload
 
 @dataclass
 class AggregatedEvent:
     """聚合事件 AE = (t_agg, N, F)"""
-    t: int  # 窗口内最大时间戳
-    N: str  # 服务节点
-    F: np.ndarray  # 特征向量
+    t: int  # 窗口內最大時間戳
+    N: str  # 服務節點
+    F: np.ndarray  # 特徵向量
     
     def __hash__(self):
         """使AggregatedEvent可哈希，以便在集合中使用"""
@@ -48,7 +48,7 @@ class AggregatedEvent:
                 np.array_equal(self.F, other.F))
 
 class DrainLogParser:
-    """简化的Drain日志解析器"""
+    """簡化的Drain日誌解析器"""
     
     def __init__(self, max_depth=4, sim_threshold=0.4):
         self.max_depth = max_depth
@@ -58,15 +58,15 @@ class DrainLogParser:
         
     def parse(self, log_message: str) -> str:
         """解析日志消息，返回模板ID"""
-        # 简化实现：基于正则表达式的模板识别
-        # 在实际应用中，建议使用完整的Drain3库
+        # 簡化實現：基於正則表達式的模板識別
+        # 在實際應用中，建議使用完整的Drain3庫
         
-        # 预处理：移除数字、IP地址等变量部分
+        # 預處理：移除數字、IP地址等變量部分
         processed = re.sub(r'\d+\.\d+\.\d+\.\d+', '<IP>', log_message)
         processed = re.sub(r'\b\d+\b', '<NUM>', processed)
         processed = re.sub(r'\b[0-9a-fA-F]{8,}\b', '<HEX>', processed)
         
-        # 简单的模板匹配
+        # 簡單的模板匹配
         template_key = processed
         if template_key not in self.templates:
             self.template_count += 1
@@ -75,24 +75,24 @@ class DrainLogParser:
         return self.templates[template_key]
 
 class POTAnomalyDetector:
-    """POT (Peaks Over Threshold) 异常检测器"""
+    """POT (Peaks Over Threshold) 異常檢測器"""
     
-    def __init__(self, window_size=1000, alpha=0.001, min_samples=100):
+    def __init__(self, window_size=500, alpha=0.01, min_samples=100):
         self.window_size = window_size
-        self.alpha = alpha  # 降低alpha值，提高異常檢測閾值
+        self.alpha = alpha  # 降低alpha值，提高異常檢測閾值（降低以檢測更多異常）
         self.min_samples = min_samples  # 增加最小樣本數要求
         self.buffer = deque(maxlen=window_size)
         
     def _fit_gpd(self, excesses):
-        """拟合广义帕累托分布"""
+        """擬合廣義帕累托分布"""
         if len(excesses) < self.min_samples:
             return None, None
             
-        # 使用矩估计作为初始值
+        # 使用矩估計作為初始值
         mean_exc = np.mean(excesses)
         var_exc = np.var(excesses)
         
-        # MLE估计
+        # MLE估計
         def neg_log_likelihood(params):
             sigma, xi = params
             if sigma <= 0:
@@ -104,7 +104,7 @@ class POTAnomalyDetector:
             else:
                 return len(excesses) * np.log(sigma) + np.sum(excesses) / sigma
                 
-        # 初始估计
+        # 初始估計
         sigma_init = mean_exc
         xi_init = -0.5 + mean_exc**2 / var_exc if var_exc > 0 else 0
         
@@ -119,13 +119,13 @@ class POTAnomalyDetector:
         return sigma_init, xi_init
     
     def detect(self, score: float) -> Optional[float]:
-        """检测异常，返回阈值（如果异常）"""
+        """檢測異常，返回閾值（如果異常）"""
         self.buffer.append(score)
         
         if len(self.buffer) < self.window_size:
             return None
             
-        # 选择合适的阈值
+        # 選擇合適的閾值
         percentiles = np.linspace(50, 95, 10)
         best_threshold = None
         best_ks = float('inf')
@@ -141,9 +141,9 @@ class POTAnomalyDetector:
             if sigma is None:
                 continue
                 
-            # 简化的KS检验
-            # 实际应用中应使用完整的统计检验
-            ks_stat = np.random.random()  # 占位符
+            # 簡化的KS檢驗
+            # 實際應用中應使用完整的統計檢驗
+            ks_stat = np.random.random()  # 佔位符
             
             if ks_stat < best_ks:
                 best_ks = ks_stat
@@ -152,7 +152,7 @@ class POTAnomalyDetector:
         if best_threshold is None:
             return None
             
-        # 计算最终阈值
+        # 計算最終閾值
         excesses = [x - best_threshold for x in self.buffer if x > best_threshold]
         sigma, xi = self._fit_gpd(excesses)
         
@@ -163,36 +163,36 @@ class POTAnomalyDetector:
         if k == 0:
             return None
             
-        # POT阈值公式
+        # POT閾值公式
         threshold_final = best_threshold + sigma/xi * ((n/k*(1-self.alpha))**(-xi) - 1)
         
         return threshold_final if score > threshold_final else None
 
 class TransferEntropyCalculator:
-    """传递熵计算器"""
+    """傳遞熵計算器"""
     
     def __init__(self, lag=1, bins=10):
         self.lag = lag
         self.bins = bins
         
     def calculate(self, x: np.ndarray, y: np.ndarray) -> float:
-        """计算从x到y的传递熵"""
+        """計算從x到y的傳遞熵"""
         if len(x) != len(y) or len(x) < self.lag + 1:
             return 0.0
             
-        # 离散化
+        # 離散化
         x_disc = pd.cut(x, bins=self.bins, labels=False, duplicates='drop')
         y_disc = pd.cut(y, bins=self.bins, labels=False, duplicates='drop')
         
         if x_disc is None or y_disc is None:
             return 0.0
             
-        # 构建时间序列
+        # 構建時間序列
         y_present = y_disc[self.lag:]
         y_past = y_disc[:-self.lag]
         x_past = x_disc[:-self.lag]
         
-        # 计算联合概率
+        # 計算聯合概率
         try:
             # P(Y_t, Y_{t-1}, X_{t-1})
             joint_xyz = pd.crosstab([y_present, y_past], x_past, normalize=True)
@@ -203,7 +203,7 @@ class TransferEntropyCalculator:
             # P(Y_t | Y_{t-1})
             cond_y_z = joint_yz.div(joint_yz.sum(axis=1), axis=0).fillna(0)
             
-            # 计算传递熵
+            # 計算傳遞熵
             te = 0.0
             for i in joint_xyz.index:
                 for j in joint_xyz.columns:
@@ -218,18 +218,18 @@ class TransferEntropyCalculator:
             return max(0.0, te)
             
         except Exception as e:
-            logger.warning(f"Transfer entropy calculation failed: {e}")
+            logger.warning(f"傳遞熵計算失敗: {e}")
             return 0.0
 
 class CPGFramework:
-    """CPG框架主类"""
+    """CPG框架主類"""
     
     def __init__(self, 
                  agg_window=5000,  # 聚合窗口(ms)
-                 anomaly_window=2000,  # 异常检测窗口（增加以提高穩定性）
-                 causal_threshold=0.01,  # 因果关系阈值（降低以檢測更多因果關係）
+                 anomaly_window=2000,  # 異常檢測窗口（增加以提高穩定性）
+                 causal_threshold=0.9,  # 因果關係閾值（降低以檢測更多因果關係alpha）
                  lookback_window=60000,  # 回溯窗口(ms)（增加回溯範圍）
-                 top_k=10):  # 因果候选数量（增加候選數）
+                 top_k=20):  # 因果候選數量（增加候選數）
         
         self.agg_window = agg_window
         self.anomaly_window = anomaly_window
@@ -237,19 +237,19 @@ class CPGFramework:
         self.lookback_window = lookback_window
         self.top_k = top_k
         
-        # 初始化组件
+        # 初始化組件
         self.log_parser = DrainLogParser()
         self.anomaly_detector = POTAnomalyDetector(window_size=anomaly_window)
         self.te_calculator = TransferEntropyCalculator()
         
-        # 存储
+        # 儲存
         self.atomic_events = []
         self.aggregated_events = []
         self.metrics_keys = []
         self.log_templates = []
         
     def _extract_atomic_events_from_metrics(self, metrics_df: pd.DataFrame) -> List[AtomicEvent]:
-        """從Metrics資料提取原子事件"""
+        """從Metrics資料提取meta event"""
         events = []
         
         # 確保time列存在
@@ -307,7 +307,7 @@ class CPGFramework:
         return events
     
     def _extract_atomic_events_from_logs(self, logs_df: pd.DataFrame) -> List[AtomicEvent]:
-        """從Logs資料提取原子事件"""
+        """從Logs資料提取meta event"""
         events = []
         
         for _, row in logs_df.iterrows():
@@ -344,7 +344,7 @@ class CPGFramework:
         return events
     
     def _extract_atomic_events_from_traces(self, traces_df: pd.DataFrame) -> List[AtomicEvent]:
-        """從Traces資料提取原子事件"""
+        """從Traces資料提取meta event"""
         events = []
         
         for _, row in traces_df.iterrows():
@@ -390,8 +390,8 @@ class CPGFramework:
         return events
     
     def _aggregate_events(self, events: List[AtomicEvent]) -> List[AggregatedEvent]:
-        """聚合原子事件"""
-        # 按服务分组
+        """聚合meta event"""
+        # 按service分組
         service_events = defaultdict(list)
         for event in events:
             service_events[event.N].append(event)
@@ -399,10 +399,10 @@ class CPGFramework:
         aggregated = []
         
         for service, svc_events in service_events.items():
-            # 按时间排序
+            # 按時間排序
             svc_events.sort(key=lambda e: e.t)
             
-            # 滑窗聚合
+            # 滑動窗口聚合
             buffer = []
             window_start = None
             
@@ -418,11 +418,11 @@ class CPGFramework:
                     if agg_event is not None:
                         aggregated.append(agg_event)
                     
-                    # 开始新窗口
+                    # 開始新窗口
                     buffer = [event]
                     window_start = event.t
                     
-            # 处理最后一个窗口
+            # 處理最後一個窗口
             if buffer:
                 agg_event = self._merge_events(buffer, service)
                 if agg_event is not None:
@@ -436,7 +436,7 @@ class CPGFramework:
             t_agg = max(e.t for e in events)
             
             # 初始化特徵向量
-            # 維度: 3*M + L + 4 (M=metrics數量, L=日誌模板數量, 4=trace特徵)
+            # 維度: 3*M + L + 4 (M=metrics數量（mean, max, last）, L=日誌模板數量, 4=trace特徵)
             M = len(self.metrics_keys)
             L = len(self.log_templates)
             feature_dim = 3 * M + L + 4
@@ -469,7 +469,7 @@ class CPGFramework:
             return None
         
         try:
-            # 填充metrics特徵 (mean, max, last)
+            # 加入metrics特徵 (mean, max, last)     
             idx = 0
             for i, metric_key in enumerate(self.metrics_keys):
                 if metric_key.startswith(service + "_"):
@@ -481,20 +481,21 @@ class CPGFramework:
                         F[idx + 2] = values[-1]       # last
                 idx += 3
                 
-            # 填充日誌特徵
+            # 加入日誌特徵
             for i, template in enumerate(self.log_templates):
                 F[3 * M + i] = log_counts.get(template, 0)
                 
-            # 填充trace特徵
+            # 加入trace特徵
             trace_idx = 3 * M + L
             F[trace_idx] = trace_starts
             F[trace_idx + 1] = trace_ends
             F[trace_idx + 2] = sum(durations) if durations else 0
             F[trace_idx + 3] = np.mean(durations) if durations else 0
-            
+
+            logger.info(f"聚合事件: {t_agg}, {service}, {F}")
             return AggregatedEvent(t=t_agg, N=service, F=F)
         except Exception as e:
-            logger.warning(f"填充特徵向量時出錯: {str(e)}")
+            logger.warning(f"加入特徵向量時出錯: {str(e)}")
             return None
     
     def _detect_anomalies(self, events: List[AggregatedEvent]) -> List[AggregatedEvent]:
@@ -508,15 +509,15 @@ class CPGFramework:
         scores = []
         for event in events:
             try:
-                # 改進的異常分數計算：結合L2範數和統計特徵
+                # 改進的異常分數計算：結合L2範數（衡量向量大小）和統計特徵（衡量變異程度）
                 l2_norm = np.linalg.norm(event.F)
                 
                 # 計算特徵向量的變異係數和偏度
                 non_zero_features = event.F[event.F != 0]
                 if len(non_zero_features) > 1:
-                    cv = np.std(non_zero_features) / (np.mean(np.abs(non_zero_features)) + 1e-6)
-                    skewness = np.mean(((non_zero_features - np.mean(non_zero_features)) / (np.std(non_zero_features) + 1e-6)) ** 3)
-                    score = l2_norm * (1 + 0.1 * cv + 0.05 * abs(skewness))
+                    cv = np.std(non_zero_features) / (np.mean(np.abs(non_zero_features)) + 1e-6)   # 特徵變異係數
+                    skewness = np.mean(((non_zero_features - np.mean(non_zero_features)) / (np.std(non_zero_features) + 1e-6)) ** 3) # 特徵偏度
+                    score = l2_norm * (1 + 0.1 * cv + 0.05 * abs(skewness)) # 異常分數
                 else:
                     score = l2_norm
                     
@@ -546,14 +547,14 @@ class CPGFramework:
     
     def _build_causal_graph(self, symptom_event: AggregatedEvent, 
                           all_events: List[AggregatedEvent]) -> Tuple[List, List]:
-        """構建因果圖"""
+        """建立因果圖"""
         try:
             nodes = {symptom_event}
             edges = []
             queue = Queue()
             queue.put(symptom_event)
             
-            # 簡化的服務依賴關係（實際應用中需要配置文件）
+            # 服務依賴關係（實際應用中需要配置文件）
             service_deps = self._get_service_dependencies()
             
             while not queue.empty():
@@ -591,7 +592,7 @@ class CPGFramework:
             
             return list(nodes), edges
         except Exception as e:
-            logger.error(f"構建因果圖時出錯: {str(e)}")
+            logger.error(f"建立因果圖時出錯: {str(e)}")
             return [], []
     
     def _get_service_dependencies(self) -> Dict[str, List[str]]:
@@ -743,7 +744,7 @@ class CPGFramework:
 @rca
 def cpg(data, inject_time=None, dataset=None, **kwargs):
     """
-    CPG: 無監督多模態事件驅動因果傳播框架
+    CPG: 多模態事件驅動因果傳播框架
     
     Args:
         data: 多模態數據，可以是DataFrame或dict
