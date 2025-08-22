@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from queue import Queue
 import json
 import logging
+
 from scipy import stats
 from scipy.optimize import minimize
 import networkx as nx
@@ -77,10 +78,10 @@ class DrainLogParser:
 class POTAnomalyDetector:
     """POT (Peaks Over Threshold) 異常檢測器"""
     
-    def __init__(self, window_size=500, alpha=0.01, min_samples=100):
+    def __init__(self, window_size=200, alpha=0.05, min_samples=20):
         self.window_size = window_size
-        self.alpha = alpha  # 降低alpha值，提高異常檢測閾值（降低以檢測更多異常）
-        self.min_samples = min_samples  # 增加最小樣本數要求
+        self.alpha = alpha  # 放寬alpha值，提高檢測靈敏度
+        self.min_samples = min_samples  # 降低最小樣本數要求
         self.buffer = deque(maxlen=window_size)
         
     def _fit_gpd(self, excesses):
@@ -125,8 +126,8 @@ class POTAnomalyDetector:
         if len(self.buffer) < self.window_size:
             return None
             
-        # 選擇合適的閾值
-        percentiles = np.linspace(50, 95, 10)
+        # 放寬percentiles範圍，提高檢測靈敏度
+        percentiles = np.linspace(60, 90, 8)
         best_threshold = None
         best_ks = float('inf')
         
@@ -141,9 +142,15 @@ class POTAnomalyDetector:
             if sigma is None:
                 continue
                 
-            # 簡化的KS檢驗
-            # 實際應用中應使用完整的統計檢驗
-            ks_stat = np.random.random()  # 佔位符
+            # 改進的KS檢驗
+            try:
+                if xi != 0:
+                    gpd_cdf = lambda x: 1 - (1 + xi * x / sigma)**(-1/xi) if xi != 0 else 1 - np.exp(-x/sigma)
+                else:
+                    gpd_cdf = lambda x: 1 - np.exp(-x/sigma)
+                ks_stat, _ = stats.ks_1samp(excesses, gpd_cdf)
+            except:
+                ks_stat = np.random.random()  # 退回佔位符
             
             if ks_stat < best_ks:
                 best_ks = ks_stat
@@ -164,7 +171,13 @@ class POTAnomalyDetector:
             return None
             
         # POT閾值公式
-        threshold_final = best_threshold + sigma/xi * ((n/k*(1-self.alpha))**(-xi) - 1)
+        try:
+            if xi != 0:
+                threshold_final = best_threshold + sigma/xi * ((n/k*(1-self.alpha))**(-xi) - 1)
+            else:
+                threshold_final = best_threshold + sigma * np.log(n/k*(1-self.alpha))
+        except:
+            return None
         
         return threshold_final if score > threshold_final else None
 
@@ -174,15 +187,23 @@ class TransferEntropyCalculator:
     def __init__(self, lag=1, bins=10):
         self.lag = lag
         self.bins = bins
+        self.dynamic_bins = True
         
     def calculate(self, x: np.ndarray, y: np.ndarray) -> float:
         """計算從x到y的傳遞熵"""
         if len(x) != len(y) or len(x) < self.lag + 1:
             return 0.0
             
+        # 動態bins基於數據變異性
+        if self.dynamic_bins:
+            cv = np.std(x) / (np.mean(np.abs(x)) + 1e-6)  # 變異係數
+            bins = max(5, min(15, int(5 + 10 * cv)))  # 高變異用高bins
+        else:
+            bins = self.bins
+            
         # 離散化
-        x_disc = pd.cut(x, bins=self.bins, labels=False, duplicates='drop')
-        y_disc = pd.cut(y, bins=self.bins, labels=False, duplicates='drop')
+        x_disc = pd.cut(x, bins=bins, labels=False, duplicates='drop')
+        y_disc = pd.cut(y, bins=bins, labels=False, duplicates='drop')
         
         if x_disc is None or y_disc is None:
             return 0.0
@@ -226,16 +247,32 @@ class CPGFramework:
     
     def __init__(self, 
                  agg_window=5000,  # 聚合窗口(ms)
-                 anomaly_window=2000,  # 異常檢測窗口（增加以提高穩定性）
-                 causal_threshold=0.9,  # 因果關係閾值（降低以檢測更多因果關係alpha）
-                 lookback_window=60000,  # 回溯窗口(ms)（增加回溯範圍）
-                 top_k=20):  # 因果候選數量（增加候選數）
+                 anomaly_window=1000,  # 異常檢測窗口
+                 causal_threshold=0.001,  # 因果關係閾值（固定模式使用）
+                 lookback_window=60000,  # 回溯窗口(ms)
+                 top_k=20,  # 因果候選數量
+                 threshold_mode: str = 'auto',  # 自動選擇模式
+                 metrics_event_percentile: float = 0.90,
+                 anomaly_percentile: float = 0.95,
+                 causal_percentile: float = 0.90,
+                 p_value_threshold: Optional[float] = 0.05,  # p-value閾值，None表示關閉
+):
         
         self.agg_window = agg_window
         self.anomaly_window = anomaly_window
         self.causal_threshold = causal_threshold
         self.lookback_window = lookback_window
         self.top_k = top_k
+        
+        # 模式：
+        # - fixed：使用POT與固定causal_threshold
+        # - percentile：使用百分位數法（含預篩）
+        # - auto：根據數據大小自動選擇
+        self.threshold_mode = threshold_mode
+        self.metrics_event_percentile = metrics_event_percentile
+        self.anomaly_percentile = anomaly_percentile
+        self.causal_percentile = causal_percentile
+        self.p_value_threshold = p_value_threshold
         
         # 初始化組件
         self.log_parser = DrainLogParser()
@@ -269,6 +306,25 @@ class CPGFramework:
                 'std': metrics_df[col].std() + 1e-6
             }
         
+        # 基於百分位的動態閾值：對每個metric列計算|標準化|的百分位閾值
+        metric_abs_thresholds: Dict[str, float] = {}
+        try:
+            perc = max(0.0, min(1.0, self.metrics_event_percentile)) * 100.0
+            for col in metric_cols:
+                std = col_stats[col]['std']
+                if std <= 0:
+                    metric_abs_thresholds[col] = float('inf')
+                    continue
+                abs_norm = (metrics_df[col] - col_stats[col]['mean']).abs() / std
+                abs_norm = abs_norm.replace([np.inf, -np.inf], np.nan).dropna()
+                if len(abs_norm) == 0:
+                    metric_abs_thresholds[col] = float('inf')
+                else:
+                    metric_abs_thresholds[col] = np.percentile(abs_norm.values, perc)
+        except Exception as e:
+            logger.warning(f"計算metrics百分位閾值時出錯: {str(e)}，退回固定閾值0.1")
+            metric_abs_thresholds = {col: 0.1 for col in metric_cols}
+        
         # 轉換時間列為毫秒（向量化操作）
         times_ms = (metrics_df['time'] * 1000).astype(int)
         
@@ -283,8 +339,8 @@ class CPGFramework:
                         # 使用預計算的統計量
                         normalized_value = (value - col_stats[col]['mean']) / col_stats[col]['std']
                         
-                        # 只處理顯著變化的值（性能優化）
-                        if abs(normalized_value) > 0.1:  # 閾值過濾
+                        # 只處理顯著變化的值（動態百分位）
+                        if abs(normalized_value) > metric_abs_thresholds.get(col, 0.1):
                             if '_container' in col or '_' in col:
                                 svc = col.split('_')[0]
                                 metric = col.split('_', 1)[1]
@@ -492,21 +548,15 @@ class CPGFramework:
             F[trace_idx + 2] = sum(durations) if durations else 0
             F[trace_idx + 3] = np.mean(durations) if durations else 0
 
-            logger.info(f"聚合事件: {t_agg}, {service}, {F}")
+            #logger.info(f"聚合事件: {t_agg}, {service}, {F}")
             return AggregatedEvent(t=t_agg, N=service, F=F)
         except Exception as e:
             logger.warning(f"加入特徵向量時出錯: {str(e)}")
             return None
     
-    def _detect_anomalies(self, events: List[AggregatedEvent]) -> List[AggregatedEvent]:
-        """檢測異常事件"""
-        anomalies = []
-        
-        if not events:
-            return anomalies
-        
-        # 計算所有事件的分數並進行預篩選（性能優化）
-        scores = []
+    def _compute_anomaly_scores(self, events: List[AggregatedEvent]) -> List[Tuple[AggregatedEvent, float]]:
+        """計算異常分數，不做閾值決策。"""
+        scores: List[Tuple[AggregatedEvent, float]] = []
         for event in events:
             try:
                 # 改進的異常分數計算：結合L2範數（衡量向量大小）和統計特徵（衡量變異程度）
@@ -520,28 +570,87 @@ class CPGFramework:
                     score = l2_norm * (1 + 0.1 * cv + 0.05 * abs(skewness)) # 異常分數
                 else:
                     score = l2_norm
-                    
                 scores.append((event, score))
             except Exception as e:
                 logger.warning(f"計算異常分數時出錯: {str(e)}")
                 continue
+        return scores
+
+    def _detect_anomalies(self, events: List[AggregatedEvent]) -> List[AggregatedEvent]:
+        """檢測異常事件"""
+        anomalies = []
         
-        # 按分數排序並只檢測前50%的事件（性能優化）
+        if not events:
+            return anomalies
+        
+        # 計算所有事件的分數
+        scores = self._compute_anomaly_scores(events)
         scores.sort(key=lambda x: x[1], reverse=True)
-        top_events = scores[:max(1, len(scores) // 2)]
         
-        logger.info(f"性能優化：從{len(events)}個聚合事件中預選了{len(top_events)}個高分事件進行異常檢測")
+        # 調整為前30%預篩，避免過度過濾
+        top_events = scores[:max(1, len(scores) // 3)]
+        score_values = [s for _, s in top_events]
         
-        for event, score in top_events:
-            try:
-                # POT異常檢測
-                threshold = self.anomaly_detector.detect(score)
-                if threshold is not None:
+        if self.threshold_mode in ('percentile', 'auto'):
+            # 百分位模式：先用百分位篩選，再結合POT
+            if not score_values:
+                return anomalies
+            # 降低百分位閾值，提高異常檢測靈敏度
+            perc = max(0.0, min(1.0, self.anomaly_percentile * 0.7)) * 100.0  # 降低30%
+            threshold_score = np.percentile(score_values, perc)
+            prefiltered = [(e, s) for e, s in top_events if s >= threshold_score]
+            logger.info(f"百分位預篩：分位 {perc:.2f} (閾值 {threshold_score:.3f}) 選 {len(prefiltered)} 事件")
+            
+            # 混合策略：POT + 簡單統計閾值
+            for event, score in prefiltered:
+                is_anomaly = False
+                try:
+                    # 嘗試POT檢測
+                    threshold = self.anomaly_detector.detect(score)
+                    if threshold is not None:
+                        is_anomaly = True
+                        logger.info(f"POT異常: {event.N} at {event.t}, 分數: {score:.3f}, POT閾值: {threshold:.3f}")
+                except Exception as e:
+                    logger.warning(f"POT檢測失敗: {str(e)}")
+                
+                # 備用策略：統計異常檢測
+                if not is_anomaly and len(score_values) > 5:
+                    mean_score = np.mean(score_values)
+                    std_score = np.std(score_values)
+                    z_score = (score - mean_score) / (std_score + 1e-6)
+                    if z_score > 1.5:  # 降低Z分數閾值
+                        is_anomaly = True
+                        logger.info(f"統計異常: {event.N} at {event.t}, 分數: {score:.3f}, Z分數: {z_score:.3f}")
+                
+                if is_anomaly:
                     anomalies.append(event)
-                    logger.info(f"在服務 {event.N} 的時間點 {event.t} 檢測到異常，分數: {score:.3f}, 閾值: {threshold:.3f}")
-            except Exception as e:
-                logger.warning(f"POT檢測異常時出錯: {str(e)}")
-                continue
+        else:
+            # 固定模式：使用更靈敏的檢測策略
+            logger.info(f"固定模式：從{len(events)}個聚合事件中預選了{len(top_events)}個高分事件進行異常檢測")
+            
+            # 如果POT無效，使用統計方法
+            pot_detected = 0
+            for event, score in top_events:
+                try:
+                    threshold = self.anomaly_detector.detect(score)
+                    if threshold is not None:
+                        anomalies.append(event)
+                        pot_detected += 1
+                        logger.info(f"POT異常: {event.N} at {event.t}, 分數: {score:.3f}, POT閾值: {threshold:.3f}")
+                except Exception as e:
+                    logger.warning(f"POT檢測失敗: {str(e)}")
+                    continue
+            
+            # 如果POT完全無效，使用統計異常檢測
+            if pot_detected == 0 and len(score_values) > 5:
+                logger.info("POT無檢測結果，使用統計異常檢測")
+                mean_score = np.mean(score_values)
+                std_score = np.std(score_values)
+                for event, score in top_events:
+                    z_score = (score - mean_score) / (std_score + 1e-6)
+                    if z_score > 1.2:  # 降低Z分數閾值
+                        anomalies.append(event)
+                        logger.info(f"統計異常: {event.N} at {event.t}, 分數: {score:.3f}, Z分數: {z_score:.3f}")
                 
         return anomalies
     
@@ -575,15 +684,46 @@ class CPGFramework:
                         # 按時間排序，取最近的K個
                         candidates = sorted(candidates, key=lambda e: e.t, reverse=True)[:self.top_k]
                         
+                        # 先計算所有候選的TE，並可選地進行p-value測試
+                        te_pairs: List[Tuple[AggregatedEvent, float]] = []
                         for candidate in candidates:
-                            # 計算傳遞熵
                             te = self.te_calculator.calculate(candidate.F, current_event.F)
                             
-                            if te > self.causal_threshold:
+                            # 可選的p-value測試
+                            if self.p_value_threshold is not None:
+                                try:
+                                    # 蒙特卡羅置換測試
+                                    null_te = []
+                                    for _ in range(50):
+                                        perm_F = np.random.permutation(candidate.F)
+                                        null_te.append(self.te_calculator.calculate(perm_F, current_event.F))
+                                    p_value = sum(1 for nt in null_te if nt >= te) / 50
+                                    
+                                    if p_value < self.p_value_threshold:
+                                        te_pairs.append((candidate, te))
+                                except Exception as e:
+                                    logger.warning(f"p-value測試失敗: {str(e)}，跳過統計檢驗")
+                                    te_pairs.append((candidate, te))
+                            else:
+                                te_pairs.append((candidate, te))
+                        
+                        if not te_pairs:
+                            continue
+                        
+                        if self.threshold_mode in ('percentile', 'auto'):
+                            te_values = [t for _, t in te_pairs]
+                            # 大幅降低因果閾值，提高因果邊檢測靈敏度
+                            perc = max(0.0, min(1.0, self.causal_percentile * 0.5)) * 100.0  # 降低50%
+                            thr = np.percentile(te_values, perc) if te_values else 0
+                        else:
+                            thr = max(0.001, self.causal_threshold * 0.1)  # 大幅降低固定閾值
+                        
+                        for candidate, te in te_pairs:
+                            # 保留原版簡單閾值判斷，不額外強制 te>0
+                            if te >= thr:
                                 if candidate not in nodes:
                                     nodes.add(candidate)
                                     queue.put(candidate)
-                                
                                 edges.append((candidate, current_event, te))
                                 logger.info(f"因果邊: {candidate.N} -> {current_event.N}, 傳遞熵: {te:.3f}")
                     except Exception as e:
@@ -596,19 +736,174 @@ class CPGFramework:
             return [], []
     
     def _get_service_dependencies(self) -> Dict[str, List[str]]:
-        """獲取服務依賴關係（簡化版本）"""
-        # 實際應用中應該從配置文件或服務註冊中心獲取
+        """獲取服務依賴關係（多數據集自適應版本）"""
         try:
-            return {
-                'frontend': ['cartservice', 'catalogservice', 'recommendationservice'],
-                'checkoutservice': ['cartservice', 'emailservice', 'paymentservice'],
-                'cartservice': ['redis'],
-                'catalogservice': ['catalogdb'],
-                'recommendationservice': ['catalogservice'],
-            }
+            # 從已聚合的事件中提取實際的服務名稱
+            if not self.aggregated_events:
+                return {}
+            
+            service_names = list(set(event.N for event in self.aggregated_events))
+            logger.info(f"檢測到的服務: {service_names[:10]}...")  # 只顯示前10個
+            
+            # 根據服務名稱模式判斷數據集類型並返回相應的依賴關係
+            if any(name.startswith('ts-') for name in service_names):
+                # Train-Ticket 數據集
+                return self._get_train_ticket_dependencies(service_names)
+            elif any(name in ['front-end', 'catalogue', 'catalogue-db', 'user', 'user-db', 'orders', 'orders-db', 'carts', 'carts-db', 'payment', 'shipping', 'queue-master'] for name in service_names):
+                # Sock-Shop 數據集 - 基於實際的服務名稱匹配
+                return self._get_sock_shop_dependencies(service_names)
+            elif any('cartservice' in name or 'checkoutservice' in name for name in service_names):
+                # Online-Boutique 數據集
+                return self._get_online_boutique_dependencies(service_names)
+            else:
+                # 未知數據集，使用通用依賴推斷
+                return self._infer_generic_dependencies(service_names)
+                
         except Exception as e:
             logger.error(f"獲取服務依賴關係時出錯: {str(e)}")
             return {}
+    
+    def _get_train_ticket_dependencies(self, service_names: List[str]) -> Dict[str, List[str]]:
+        """Train-Ticket 數據集的服務依賴關係"""
+        deps = {}
+        
+        # 基於Train-Ticket架構的真實依賴關係
+        train_ticket_deps = {
+            'ts-ui-dashboard': ['ts-gateway-service'],
+            'ts-gateway-service': ['ts-auth-service', 'ts-user-service'],
+            'ts-auth-service': ['ts-user-service', 'ts-config-service'],
+            'ts-user-service': ['ts-config-service'],
+            'ts-order-service': ['ts-seat-service', 'ts-payment-service', 'ts-config-service'],
+            'ts-order-other-service': ['ts-seat-service', 'ts-payment-service'],
+            'ts-preserve-service': ['ts-seat-service', 'ts-user-service', 'ts-config-service'],
+            'ts-travel-service': ['ts-route-service', 'ts-train-service', 'ts-config-service'],
+            'ts-travel2-service': ['ts-route-service', 'ts-train-service', 'ts-config-service'],
+            'ts-route-service': ['ts-station-service', 'ts-config-service'],
+            'ts-seat-service': ['ts-config-service'],
+            'ts-payment-service': ['ts-inside-payment-service', 'ts-config-service'],
+            'ts-food-service': ['ts-food-map-service', 'ts-train-food-service'],
+            'ts-consign-service': ['ts-consign-price-service', 'ts-config-service'],
+            'ts-security-service': ['ts-order-service', 'ts-order-other-service'],
+            'ts-station-service': ['ts-config-service'],
+            'ts-train-service': ['ts-config-service'],
+            'ts-price-service': ['ts-config-service'],
+            'ts-notification-service': ['ts-user-service'],
+            'ts-voucher-service': ['ts-config-service'],
+            'ts-rebook-service': ['ts-order-service', 'ts-payment-service'],
+            'ts-cancel-service': ['ts-order-service', 'ts-payment-service'],
+            'ts-route-plan-service': ['ts-route-service', 'ts-travel-service'],
+            'ts-food-delivery-service': ['ts-food-service', 'ts-delivery-service'],
+            'ts-admin-order-service': ['ts-order-service'],
+            'ts-admin-route-service': ['ts-route-service'],
+            'ts-admin-travel-service': ['ts-travel-service'],
+            'ts-admin-user-service': ['ts-user-service'],
+            'ts-execute-service': ['ts-order-service'],
+            'ts-contacts-service': ['ts-user-service'],
+            'ts-assurance-service': ['ts-config-service'],
+            'ts-avatar-service': ['ts-user-service'],
+            'ts-basic-service': ['ts-config-service'],
+            'ts-delivery-service': ['ts-config-service'],
+            'ts-news-service': ['ts-config-service'],
+            'ts-ticket-office-service': ['ts-config-service'],
+            'ts-verification-code-service': ['ts-config-service'],
+            'ts-travel-plan-service': ['ts-route-service', 'ts-travel-service']
+        }
+        
+        # 只保留實際存在的服務
+        for service in service_names:
+            if service in train_ticket_deps:
+                # 只保留實際存在的上游服務
+                upstream = [s for s in train_ticket_deps[service] if s in service_names]
+                if upstream:
+                    deps[service] = upstream
+        
+        # 對於IP格式的節點（如192-168-xxx），推斷為數據庫或外部服務
+        for service in service_names:
+            if '-' in service and any(char.isdigit() for char in service):
+                # 可能是數據庫節點，不設置依賴
+                continue
+                
+        logger.info(f"Train-Ticket依賴關係: {len(deps)} 個服務有上游依賴")
+        return deps
+    
+    def _get_sock_shop_dependencies(self, service_names: List[str]) -> Dict[str, List[str]]:
+        """Sock-Shop 數據集的服務依賴關係"""
+        deps = {}
+        
+        sock_shop_deps = {
+            'front-end': ['catalogue', 'user', 'carts', 'orders'],
+            'orders': ['payment', 'shipping', 'carts', 'user'],
+            'payment': ['user'],
+            'shipping': [],
+            'carts': ['catalogue'],
+            'catalogue': ['catalogue-db'],
+            'user': ['user-db'],
+            'queue-master': ['rabbitmq'],
+        }
+        
+        # 直接匹配服務名稱，不進行清理
+        for service in service_names:
+            if service in sock_shop_deps:
+                # 只保留實際存在的上游服務
+                upstream = [s for s in sock_shop_deps[service] if s in service_names]
+                if upstream:
+                    deps[service] = upstream
+        
+        logger.info(f"Sock-Shop依賴關係: {len(deps)} 個服務有上游依賴")
+        return deps
+    
+    def _get_online_boutique_dependencies(self, service_names: List[str]) -> Dict[str, List[str]]:
+        """Online-Boutique 數據集的服務依賴關係"""
+        return {
+            'frontend': ['cartservice', 'catalogservice', 'recommendationservice'],
+            'checkoutservice': ['cartservice', 'emailservice', 'paymentservice'],
+            'cartservice': ['redis'],
+            'catalogservice': ['catalogdb'],
+            'recommendationservice': ['catalogservice'],
+        }
+    
+    def _infer_generic_dependencies(self, service_names: List[str]) -> Dict[str, List[str]]:
+        """通用依賴推斷（基於服務名稱模式）"""
+        deps = {}
+        
+        # 基於常見的微服務命名模式推斷依賴
+        for service in service_names:
+            upstream = []
+            
+            # 推斷規則
+            if 'frontend' in service.lower() or 'ui' in service.lower():
+                # 前端通常依賴於多個後端服務
+                potential_backends = [s for s in service_names 
+                                    if 'service' in s.lower() and s != service]
+                upstream.extend(potential_backends[:3])  # 最多3個依賴
+                
+            elif 'gateway' in service.lower():
+                # 網關通常依賴於認證和用戶服務
+                auth_services = [s for s in service_names 
+                               if 'auth' in s.lower() or 'user' in s.lower()]
+                upstream.extend(auth_services)
+                
+            elif 'order' in service.lower():
+                # 訂單服務通常依賴於用戶、支付、庫存等
+                deps_services = [s for s in service_names 
+                               if any(keyword in s.lower() for keyword in ['user', 'payment', 'inventory', 'product'])]
+                upstream.extend(deps_services)
+                
+            elif 'payment' in service.lower():
+                # 支付服務通常依賴於用戶服務
+                user_services = [s for s in service_names if 'user' in s.lower()]
+                upstream.extend(user_services)
+            
+            # 所有應用服務都可能依賴數據庫
+            db_services = [s for s in service_names 
+                          if any(keyword in s.lower() for keyword in ['db', 'database', 'redis', 'mongo', 'mysql'])]
+            upstream.extend(db_services)
+            
+            if upstream:
+                deps[service] = list(set(upstream))  # 去重
+        
+        logger.info(f"通用依賴推斷: {len(deps)} 個服務有上游依賴")
+        return deps
     
     def _calculate_root_cause_scores(self, nodes: List, edges: List) -> Dict[str, float]:
         """計算根因貢獻度"""
@@ -673,6 +968,8 @@ class CPGFramework:
                 logger.warning("聚合事件為空")
                 return self._empty_result()
             
+
+            
             # 第三步：全局異常檢測
             logger.info("步驟3: 全局異常檢測")
             anomaly_events = self._detect_anomalies(self.aggregated_events)
@@ -729,7 +1026,7 @@ class CPGFramework:
         except Exception as e:
             logger.error(f"CPG分析失敗: {str(e)}")
             return self._empty_result()
-            
+    
     def _empty_result(self) -> Dict[str, Any]:
         """返回空結果"""
         return {
@@ -754,9 +1051,14 @@ def cpg(data, inject_time=None, dataset=None, **kwargs):
         **kwargs: 其他參數
             - agg_window: 聚合窗口大小(ms)，默認5000
             - anomaly_window: 異常檢測窗口大小，默認1000
-            - causal_threshold: 因果關係閾值，默認0.1
+            - causal_threshold: 因果關係閾值（當 threshold_mode='fixed' 時使用），默認0.05
             - lookback_window: 回溯窗口(ms)，默認30000
             - top_k: 因果候選數量，默認5
+            - threshold_mode: 閾值模式 'percentile' | 'auto' | 'fixed'，默認 'auto'
+            - metrics_event_percentile: 指標事件觸發的|標準化|百分位，默認0.90
+            - anomaly_percentile: 全局異常分數選取的分位，默認0.95
+            - causal_percentile: 局部因果TE選取的分位，默認0.90
+
     
     Returns:
         dict: {
@@ -772,13 +1074,29 @@ def cpg(data, inject_time=None, dataset=None, **kwargs):
     logger.info(f"啟動CPG方法，數據集: {dataset}")
     
     try:
-        # 參數配置（優化後的默認值）
+        # 動態配置：根據數據大小自動調整參數
+        data_size = 0
+        if isinstance(data, dict):
+            if 'metric' in data:
+                data_size = len(data['metric'])
+            elif 'logts' in data:
+                data_size = len(data['logts'])
+        else:
+            data_size = len(data)
+        
+        # 參數配置（根據數據大小優化）
         config = {
             'agg_window': kwargs.get('agg_window', 5000),
-            'anomaly_window': kwargs.get('anomaly_window', 2000),  # 增加穩定性
-            'causal_threshold': kwargs.get('causal_threshold', 0.05),  # 降低閾值檢測更多因果關係
-            'lookback_window': kwargs.get('lookback_window', 60000),  # 增加回溯範圍
-            'top_k': kwargs.get('top_k', 10)  # 增加候選數量
+            'anomaly_window': kwargs.get('anomaly_window', 1000),
+            'causal_threshold': kwargs.get('causal_threshold', 0.001),  # 恢復嚴格閾值
+            'lookback_window': kwargs.get('lookback_window', 60000),
+            'top_k': kwargs.get('top_k', 20),
+            'threshold_mode': kwargs.get('threshold_mode', 'fixed' if data_size < 1000 else 'auto'),
+            'metrics_event_percentile': kwargs.get('metrics_event_percentile', 
+                                                 0.75 if data_size < 1000 else 0.85),  # 降低閾值
+            'anomaly_percentile': kwargs.get('anomaly_percentile', 0.85),  # 降低異常閾值
+            'causal_percentile': kwargs.get('causal_percentile', 0.70),  # 大幅降低因果閾值
+            'p_value_threshold': kwargs.get('p_value_threshold', None),  # 暫時關閉p-value測試
         }
         
         # 初始化CPG框架
@@ -898,8 +1216,24 @@ def cpg(data, inject_time=None, dataset=None, **kwargs):
         # 運行CPG分析
         result = cpg_framework.process(processed_data)
         
+        # 增強日誌：計算圖模組化
+        try:
+            if result.get('causal_edges'):
+                G = nx.DiGraph()
+                for source, target, weight in result['causal_edges']:
+                    G.add_edge(source, target, weight=weight)
+                
+                communities = list(nx.algorithms.community.greedy_modularity_communities(G))
+                modularity = nx.algorithms.community.modularity(G, communities)
+            else:
+                modularity = 0.0
+        except Exception as e:
+            logger.warning(f"計算圖模組化失敗: {str(e)}")
+            modularity = 0.0
+        
         logger.info(f"CPG分析完成，檢測到 {result.get('anomaly_events', 0)} 個異常事件")
         logger.info(f"建立因果圖包含 {len(result.get('causal_edges', []))} 條因果邊")
+        logger.info(f"因果圖模組化: {modularity:.3f} (0.2-0.5表示結構清晰)")
         
         return result
         
