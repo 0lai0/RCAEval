@@ -62,6 +62,8 @@ if is_py310():
         pc_randomwalk,
         run,
         tracerca,
+        cpg_adaptive,
+        cpg,
     )
 
 elif is_py38():
