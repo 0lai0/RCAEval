@@ -148,16 +148,40 @@ if not data_paths:
 #         new_data_paths.append(p)
 # data_paths = new_data_paths
 if args.test is True:
-    data_paths = data_paths[:2]
+    # For test mode, select diverse cases from different services and fault types
+    print(f"Test mode: Selecting diverse cases from {len(data_paths)} available files")
+    
+    # Group by service and fault type to ensure diversity
+    service_fault_groups = {}
+    for path in data_paths:
+        service, fault = basename(dirname(dirname(path))).split("_", 1)
+        key = f"{service}_{fault}"
+        if key not in service_fault_groups:
+            service_fault_groups[key] = []
+        service_fault_groups[key].append(path)
+    
+    # Select one case from each group, up to 2 groups
+    test_paths = []
+    for i, (key, paths) in enumerate(service_fault_groups.items()):
+        if i >= 2:  # Limit to 2 different service-fault combinations
+            break
+        test_paths.append(paths[0])  # Take first case from each group
+        print(f"  Selected: {key} -> {basename(paths[0])}")
+    
+    data_paths = test_paths
+    print(f"Test mode: Using {len(data_paths)} diverse cases")
 
 
-# prepare output paths
+# prepare output paths - NO CACHING
 from tempfile import TemporaryDirectory
-# output_path = TemporaryDirectory().name
-output_path = "output"
-report_path = join(output_path, f"report.xlsx")
+import shutil
+
+# Always use temporary directory to avoid cache issues
+output_path = TemporaryDirectory().name
 result_path = join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
+print(f"Using temporary output directory: {output_path}")
+print("NO CACHING - Fresh execution every time")
 
 
 def process(data_path):
@@ -256,14 +280,12 @@ def process(data_path):
             args=run_args,
         )
         root_causes = out.get("ranks")
-        # print("==============")
-        # print(f"{data_path=}")
-        # print(root_causes[:5])
+        execution_time = (datetime.now() - st).total_seconds()
+        
         dump_json(filename=rp, data={0: root_causes})
+        print(f"✅ Processed: {service}_{metric}_{case} (took {execution_time:.2f}s)")
     except Exception as e:
-        raise e
-        print(f"{args.method=} failed on {data_path=}")
-        print(e)
+        print(f"❌ {args.method} failed on {data_path}: {e}")
         rp = join(result_path, f"{service}_{metric}_{case}_failed.json")
         with open(rp, "w") as f:
             json.dump({"error": str(e)}, f)
@@ -280,9 +302,19 @@ avg_speed = round(time_taken.total_seconds() / len(data_paths), 2)
 
 
 # ======== EVALUTION ===========
+# Only process results from current run - NO CACHING
 rps = glob.glob(join(result_path, "*.json"))
+print(f"Processing {len(rps)} result files from current run (NO CACHE)")
+
+if len(rps) == 0:
+    print("❌ No result files found! Check if processing completed successfully.")
+    exit(1)
+
 services = sorted(list(set([basename(x).split("_")[0] for x in rps])))
 faults = sorted(list(set([basename(x).split("_")[1] for x in rps])))
+
+print(f"Found services: {services}")
+print(f"Found fault types: {faults}")
 
 eval_data = {
     "service-fault": [],
@@ -362,41 +394,59 @@ for service in services:
                 s_evaluator.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                 f_evaluator.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                if fault == "cpu":
+                # Map fault codes to fault types for evaluation
+                fault_type_map = {
+                    "f1": "cpu",
+                    "f2": "mem", 
+                    "f3": "delay",
+                    "f4": "disk",
+                    "f3_1": "delay",
+                    # Direct mappings
+                    "cpu": "cpu",
+                    "mem": "mem",
+                    "delay": "delay",
+                    "disk": "disk",
+                    "socket": "socket",
+                    "loss": "loss"
+                }
+                
+                fault_type = fault_type_map.get(fault, fault)
+
+                if fault_type == "cpu":
                     s_evaluator_cpu.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_cpu.add_case(ranks=f_ranks, answer=Node(service, fault))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                elif fault == "mem":
+                elif fault_type == "mem":
                     s_evaluator_mem.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_mem.add_case(ranks=f_ranks, answer=Node(service, fault))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                elif fault == "delay":
+                elif fault_type == "delay":
                     s_evaluator_lat.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_lat.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
-                elif fault == "loss":
+                elif fault_type == "loss":
                     s_evaluator_loss.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_loss.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
-                elif fault == "disk":
+                elif fault_type == "disk":
                     s_evaluator_io.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_io.add_case(ranks=f_ranks, answer=Node(service, "diskio"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "diskio"))
-                elif fault == "socket":
+                elif fault_type == "socket":
                     s_evaluator_socket.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_socket.add_case(ranks=f_ranks, answer=Node(service, "socket"))
 
@@ -438,7 +488,9 @@ for name, s_evaluator, f_evaluator in [
         name = "disk"
 
     if s_evaluator.average(5) is not None:
-        print( f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
+        print(f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
+    else:
+        print(f"Avg@5-{name.upper()}:".ljust(12), "N/A")
 
 
 print("---")
