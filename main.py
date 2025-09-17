@@ -362,41 +362,51 @@ for service in services:
                 s_evaluator.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                 f_evaluator.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                if fault == "cpu":
+                # Map RE fault codes to canonical categories
+                fault_type_map = {
+                    "f1": "cpu",
+                    "f2": "mem",
+                    "f3": "delay",
+                    "f3_1": "delay",
+                    "f4": "disk",
+                }
+                canonical_fault = fault_type_map.get(fault, fault)
+
+                if canonical_fault == "cpu":
                     s_evaluator_cpu.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_cpu.add_case(ranks=f_ranks, answer=Node(service, fault))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                elif fault == "mem":
+                elif canonical_fault == "mem":
                     s_evaluator_mem.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_mem.add_case(ranks=f_ranks, answer=Node(service, fault))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, fault))
 
-                elif fault == "delay":
+                elif canonical_fault == "delay":
                     s_evaluator_lat.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_lat.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
-                elif fault == "loss":
+                elif canonical_fault == "loss":
                     s_evaluator_loss.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_loss.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "latency"))
 
-                elif fault == "disk":
+                elif canonical_fault == "disk":
                     s_evaluator_io.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_io.add_case(ranks=f_ranks, answer=Node(service, "diskio"))
 
                     s_evaluator_all.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_all.add_case(ranks=f_ranks, answer=Node(service, "diskio"))
-                elif fault == "socket":
+                elif canonical_fault == "socket":
                     s_evaluator_socket.add_case(ranks=s_ranks, answer=Node(service, "unknown"))
                     f_evaluator_socket.add_case(ranks=f_ranks, answer=Node(service, "socket"))
 
@@ -437,8 +447,11 @@ for name, s_evaluator, f_evaluator in [
     if name == "io":
         name = "disk"
 
-    if s_evaluator.average(5) is not None:
-        print( f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
+    avg_val = s_evaluator.average(5)
+    if avg_val is not None:
+        print( f"Avg@5-{name.upper()}:".ljust(12), round(avg_val, 2))
+    else:
+        print( f"Avg@5-{name.upper()}:".ljust(12), "N/A")
 
 
 print("---")
