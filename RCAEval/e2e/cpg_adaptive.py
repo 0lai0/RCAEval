@@ -1,23 +1,21 @@
 """
-Adaptive CPG (Causal Propagation Graph) Framework for Root Cause Analysis
-自適應因果傳播圖框架
+CPG (Causal Propagation Graph) Framework for Root Cause Analysis
+因果傳播圖框架
 
-This module implements a comprehensive 7-step adaptive CPG framework for RCA:
+This module implements a comprehensive 6-step adaptive CPG framework for RCA:
 1. Preprocessing & Atomic Event Extraction
 2. Aggregated Event Generation  
 3. Global Anomaly Detection → Symptom Set S
 4. Local CPG Construction Build_CPG
 5. Root Cause Contribution Quantification
 6. Fault Narrative & Output
-7. Adaptive Parameter Optimization & Accuracy Monitoring
 
 Features:
-- Self-adaptive parameters (no hard-coded values)
+- Self-adaptive parameters
 - Ensemble methods for robustness
 - Multi-modal data support (metrics/logs/traces)
 - Correlation analysis for causal discovery
 - PageRank for contribution quantification
-- Bayesian optimization for parameter tuning
 """
 
 import warnings
@@ -54,12 +52,6 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-# Bayesian optimization (optional)
-try:
-    from hyperopt import hp, fmin, tpe, Trials
-    HYPEROPT_AVAILABLE = True
-except ImportError:
-    HYPEROPT_AVAILABLE = False
 
 # Change point detection (optional)
 try:
@@ -86,8 +78,8 @@ def _infer_target_service_from_path(data_path: str) -> Optional[str]:
         return None
 
 
-def _load_service_knowledge_base() -> Dict[str, Dict[str, Any]]:
-    """載入服務知識庫"""
+def _load_service_topology() -> Dict[str, Dict[str, Any]]:
+    """載入服務拓撲結構"""
     # 基於資料集結構的微服務依賴關係知識庫
     knowledge_base = {
         # Online Boutique 服務依賴
@@ -273,14 +265,12 @@ class AdaptiveCPGFramework:
         self.pipeline = AdaptivePipeline()
         self.change_detector = BayesianChangePointDetector()
         self.models = {}
-        self.thresholds = {}
-        self.performance_history = []
         
         # 新增屬性
         self.target_service = None
         self.sli = None
         self.inject_time = None
-        self.knowledge_base = _load_service_knowledge_base()
+        self.knowledge_base = _load_service_topology()
         
     def preprocess_and_extract_atomic_events(self, raw_data: pd.DataFrame) -> List[AtomicEvent]:
         """
@@ -1048,72 +1038,11 @@ class AdaptiveCPGFramework:
         
         return min(5, len(score_values))
     
-    def adaptive_optimization(self, evaluation_results: Dict[str, float]) -> bool:
-        """
-        步骤7: 参数在线自适应 & 准确度监控
-        """
-        print("Step 7: Adaptive Parameter Optimization")
-        
-        precision = evaluation_results.get('precision', 0.0)
-        self.performance_history.append(precision)
-        
-        # 检查是否需要优化
-        if precision < 0.8:
-            print(f"Precision {precision:.3f} below threshold, triggering optimization")
-            
-            if HYPEROPT_AVAILABLE:
-                return self._bayesian_optimization()
-            else:
-                return self._simple_parameter_adjustment()
-        
-        return False
-    
-    def _bayesian_optimization(self) -> bool:
-        """贝叶斯优化参数"""
-        print("Running Bayesian optimization...")
-        
-        # 定义搜索空间
-        space = {
-            'anomaly_threshold': hp.uniform('anomaly_threshold', 0.8, 0.99),
-            'causal_confidence_threshold': hp.uniform('causal_confidence_threshold', 0.1, 0.5),
-            'lookback_multiplier': hp.uniform('lookback_multiplier', 5, 20)
-        }
-        
-        def objective(params):
-            # 这里应该使用新参数重新运行算法并评估性能
-            # 为简化，返回随机值
-            return np.random.random()
-        
-        try:
-            trials = Trials()
-            best = fmin(fn=objective, space=space, algo=tpe.suggest, max_evals=10, trials=trials)
-            print(f"Optimization completed: {best}")
-            return True
-        except Exception as e:
-            print(f"Optimization failed: {e}")
-            return False
-    
-    def _simple_parameter_adjustment(self) -> bool:
-        """简单参数调整"""
-        print("Applying simple parameter adjustments...")
-        
-        # 基于历史性能调整阈值
-        if len(self.performance_history) > 1:
-            recent_trend = np.mean(self.performance_history[-3:]) if len(self.performance_history) >= 3 else self.performance_history[-1]
-            
-            if recent_trend < 0.6:
-                # 降低阈值，增加敏感性
-                self.thresholds['anomaly'] = self.thresholds.get('anomaly', 0.95) * 0.9
-                self.thresholds['causal'] = self.thresholds.get('causal', 0.3) * 0.8
-            
-            return True
-        
-        return False
 
 
 def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
     """
-    CPG框架 - 增強版本，支持SLI綁定和服務候選過濾
+    CPG框架 - 支持SLI綁定和服務候選過濾
     
     Args:
         data: pd.DataFrame, 輸入數據
@@ -1222,10 +1151,6 @@ def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
         remaining_services = [s for s in all_service_names if s not in ranked_services]
         ranks.extend(remaining_services)
         
-        # 步驟7: 自適應優化（可選）
-        if kwargs.get("enable_optimization", False):
-            evaluation_results = {"precision": 0.85}  # 這裡應該是真實的評估結果
-            cpg_framework.adaptive_optimization(evaluation_results)
         
         print(f"=== CPG Framework completed. Final ranking: {ranks[:5]}... ===")
         
