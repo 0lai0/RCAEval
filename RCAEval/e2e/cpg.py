@@ -10,36 +10,21 @@ This module implements a comprehensive 6-step adaptive CPG framework for RCA:
 5. Root Cause Contribution Quantification
 6. Fault Narrative & Output
 
-Features:
-- Self-adaptive parameters
-- Ensemble methods for robustness
-- Multi-modal data support (metrics/logs/traces)
-- Correlation analysis for causal discovery
-- PageRank for contribution quantification
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
-import os
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Any, Optional
-from datetime import datetime
-import pickle
-import json
 from dataclasses import dataclass
 
 # Scientific computing and ML
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import KernelDensity
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import Pipeline
-from sklearn.decomposition import PCA
-from sklearn.cluster import DBSCAN
 from scipy import stats
-from scipy.signal import find_peaks
 import networkx as nx
 
 # Deep learning (optional, with fallbacks)
@@ -52,31 +37,7 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-
-# Change point detection (optional)
-try:
-    import ruptures as rpt
-    RUPTURES_AVAILABLE = True
-except ImportError:
-    RUPTURES_AVAILABLE = False
-
 from RCAEval.io.time_series import preprocess
-
-
-def _infer_target_service_from_path(data_path: str) -> Optional[str]:
-    """從數據路徑推斷目標服務"""
-    try:
-        import os
-        # 從路徑中提取服務名稱，例如: .../ts-auth-service_f1/1/simple_metrics.csv
-        path_parts = data_path.split(os.sep)
-        for part in reversed(path_parts):
-            if '_f' in part or '_cpu' in part or '_mem' in part:
-                service_name = part.split('_')[0]
-                return service_name
-        return None
-    except Exception:
-        return None
-
 
 def _load_service_topology() -> Dict[str, Dict[str, Any]]:
     """載入服務拓撲結構"""
@@ -184,29 +145,16 @@ class AdaptivePipeline:
             return data
 
 
-class BayesianChangePointDetector:
-    """貝葉斯變點檢測器"""
-    
-    def __init__(self):
-        self.change_points = []
-    
-    def detect_change_points(self, timestamps: np.ndarray, data: np.ndarray = None) -> List[int]:
-        """檢測時間序列中的變點"""
-        if RUPTURES_AVAILABLE and data is not None:
-            # 使用ruptures庫進行變點檢測
-            algo = rpt.Pelt(model="rbf").fit(data.reshape(-1, 1))
-            change_points = algo.predict(pen=10)
-            return change_points[:-1]  # 移除最後一個點
-        else:
-            # 簡單的基於時間間隔的變點檢測
-            intervals = np.diff(timestamps)
-            threshold = np.percentile(intervals, 75) + 1.5 * (np.percentile(intervals, 75) - np.percentile(intervals, 25))
-            change_points = np.where(intervals > threshold)[0] + 1
-            return change_points.tolist() 
 
 
 class CorrelationCausalModel:
-    """基於相關性的因果發現模型"""
+    """
+    基於相關性的因果發現模型
+    
+    未來改進方向：
+    - 實現帶時滯的交叉相關性計算（Time-Lagged Cross-Correlation）
+    - 捕捉具有時間延遲的因果關係，減少偽相關
+    """
     
     def __init__(self, input_dim: int):
         self.input_dim = input_dim
@@ -215,6 +163,9 @@ class CorrelationCausalModel:
         """
         推斷因果關係。
         透過計算每個候選事件與目標症狀之間的特徵相關性來實現。
+        
+        注意：當前使用簡單的皮爾遜相關係數。
+        未來可改進為考慮時間延遲的因果推斷（見類文檔字符串）。
         """
         edges = []
         
@@ -226,7 +177,9 @@ class CorrelationCausalModel:
                     correlation = np.corrcoef(candidate.features, target_features)[0, 1]
                     if not np.isnan(correlation):
                         confidence = abs(correlation)
-                        if confidence > 0.05:
+                        # 自適應閾值：基於數據分布動態調整
+                        adaptive_threshold = max(0.1, np.std([c.features for c in candidates if len(c.features) > 0]) * 0.5)
+                        if confidence > adaptive_threshold:
                             edges.append({
                                 'source': candidate,
                                 'confidence': confidence,
@@ -236,40 +189,49 @@ class CorrelationCausalModel:
         return edges
 
 
-class PageRankImportanceCalculator:
-    """使用 PageRank 演算法來計算圖中節點重要性的計算器"""
+def get_service_priority(service_name: str) -> float:
+    """
+    根據服務名稱和類型給予優先級分數，模仿論文的領域知識
     
-    def __init__(self, graph: nx.DiGraph):
-        self.graph = graph
+    優先級分層：
+    - Level 1 (1.0): 上游入口或核心服務（frontend, gateway, ui, auth, order等）
+    - Level 2 (0.7): 中間業務邏輯服務（product, cart, user, shipping等）
+    - Level 3 (0.4): 下游基礎設施或輔助服務（db, mongo, redis, email等）
     
-    def compute_importance(self) -> Dict[str, float]:
-        """計算節點重要性分數"""
-        if len(self.graph.nodes()) == 0:
-            return {}
+    Args:
+        service_name: 服務名稱
         
-        # 使用PageRank作為重要性排序依據
-        try:
-            pagerank_scores = nx.pagerank(self.graph, alpha=0.85)
-        except:
-            # 如果圖為空或有問題，返回平均分布
-            nodes = list(self.graph.nodes())
-            pagerank_scores = {node: 1.0/len(nodes) for node in nodes}
-        
-        return pagerank_scores
+    Returns:
+        float: 優先級分數，範圍[0.4, 1.0]
+    """
+    service_name_lower = service_name.lower()
+    
+    # Level 1: 上游入口或核心服務 (分數最高)
+    if any(p in service_name_lower for p in ['frontend', 'front-end', 'ui', 'gateway', 'auth', 'order']):
+        return 1.0
+    
+    # Level 2: 中間業務邏輯
+    elif any(p in service_name_lower for p in ['product', 'cart', 'user', 'shipping', 'payment', 'checkout', 'catalogue', 'catalog']):
+        return 0.7
+    
+    # Level 3: 下游基礎設施或輔助服務 (分數最低)
+    elif any(p in service_name_lower for p in ['db', 'mongo', 'redis', 'email', 'cache', 'queue']):
+        return 0.4
+    
+    # 默認中等優先級
+    return 0.5
 
 
-class AdaptiveCPGFramework:
-    """自適應CPG框架 - 增強版"""
+
+
+class CPGFramework:
+    """
+    CPG框架
+    """
     
     def __init__(self):
         self.pipeline = AdaptivePipeline()
-        self.change_detector = BayesianChangePointDetector()
         self.models = {}
-        
-        # 新增屬性
-        self.target_service = None
-        self.sli = None
-        self.inject_time = None
         self.knowledge_base = _load_service_topology()
         
     def preprocess_and_extract_atomic_events(self, raw_data: pd.DataFrame) -> List[AtomicEvent]:
@@ -278,77 +240,38 @@ class AdaptiveCPGFramework:
         """
         print("Step 1: Preprocessing & Atomic Event Extraction")
         
+        # 簡化的預處理和事件提取
         try:
             # 自適應預處理
             cleaned_data = self.pipeline.fit_transform(raw_data.copy())
-            
-            # 確保處理後還有資料
             if cleaned_data.empty:
-                print("Warning: No data left after preprocessing, using original data")
                 cleaned_data = raw_data.copy()
             
-            # 密度估計自動提取事件
+            # 統一的事件提取邏輯
             events = []
+            sample_rate = max(1, len(cleaned_data) // 50)  # 採樣約50個點
             
-            if 'time' in cleaned_data.columns:
-                timestamps = cleaned_data['time'].values
+            for idx, row in cleaned_data.iloc[::sample_rate].iterrows():
+                # 使用時間列或索引作為時間戳
+                timestamp = row.get('time', float(idx))
+                service_name = self._infer_service_name_prioritized(row, cleaned_data.columns)
                 
-                try:
-                    # 使用核密度估計
-                    kde = KernelDensity(kernel='gaussian', bandwidth=1.0)
-                    kde.fit(timestamps.reshape(-1, 1))
-                    log_density = kde.score_samples(timestamps.reshape(-1, 1))
-                    
-                    # 自適應閾值
-                    threshold = np.percentile(log_density, 75)
-                    
-                    for idx, row in cleaned_data.iterrows():
-                        t = row.get('time', idx)
-                        if idx < len(log_density) and log_density[idx] > threshold:
-                            # 推斷服務名稱（從列名中提取），優先選擇微服務而不是節點
-                            service_name = self._infer_service_name_prioritized(row, cleaned_data.columns)
-                            
-                            event = AtomicEvent(
-                                timestamp=t,
-                                service_name=service_name,
-                                event_type='metrics',
-                                data_dict=row.to_dict()
-                            )
-                            events.append(event)
-                except Exception as e:
-                    print(f"Warning: KDE failed ({e}), using simple sampling")
-                    # 降級到簡單採樣
-                    sample_rate = max(1, len(cleaned_data) // 50)  # 采样约50个点
-                    for idx, row in cleaned_data.iloc[::sample_rate].iterrows():
-                        service_name = self._infer_service_name_prioritized(row, cleaned_data.columns)
-                        event = AtomicEvent(
-                            timestamp=row.get('time', idx),
-                            service_name=service_name,
-                            event_type='metrics',
-                            data_dict=row.to_dict()
-                        )
-                        events.append(event)
-            else:
-                # 如果沒有時間列，使用索引作為時間
-                sample_rate = max(1, len(cleaned_data) // 50)  # 採樣約50個點
-                for idx, row in cleaned_data.iloc[::sample_rate].iterrows():
-                    service_name = self._infer_service_name_prioritized(row, cleaned_data.columns)
-                    event = AtomicEvent(
-                        timestamp=float(idx),
-                        service_name=service_name,
-                        event_type='metrics',
-                        data_dict=row.to_dict()
-                    )
-                    events.append(event)
+                event = AtomicEvent(
+                    timestamp=timestamp,
+                    service_name=service_name,
+                    event_type='metrics',
+                    data_dict=row.to_dict()
+                )
+                events.append(event)
             
             print(f"Extracted {len(events)} atomic events")
             return events
             
         except Exception as e:
-            print(f"Warning: Event extraction failed ({e}), using fallback method")
-            # 最簡單的降級方法
+            print(f"Warning: Event extraction failed ({e}), using minimal fallback")
+            # 最小降級：只取前10行
             events = []
-            sample_data = raw_data.head(min(50, len(raw_data)))  # 最多取50行
+            sample_data = raw_data.head(min(10, len(raw_data)))
             for idx, row in sample_data.iterrows():
                 service_name = self._infer_service_name_prioritized(row, raw_data.columns)
                 event = AtomicEvent(
@@ -361,164 +284,6 @@ class AdaptiveCPGFramework:
             print(f"Fallback: Extracted {len(events)} atomic events")
             return events
     
-    def preprocess_and_extract_atomic_events_enhanced(self, raw_data: pd.DataFrame) -> List[AtomicEvent]:
-        """
-        第1步: 前處理 & 原子事件提取 - 增強版（SLI綁定和服務候選過濾）
-        """
-        print("Step 1: Enhanced Preprocessing & Atomic Event Extraction")
-        
-        try:
-            # 自適應預處理
-            cleaned_data = self.pipeline.fit_transform(raw_data.copy())
-            
-            # 確保處理後還有資料
-            if cleaned_data.empty:
-                print("Warning: No data left after preprocessing, using original data")
-                cleaned_data = raw_data.copy()
-            
-            # 1. SLI 綁定：如果有 SLI 和注入時間，優先在注入窗口附近採樣
-            events = []
-            
-            if 'time' in cleaned_data.columns and self.inject_time is not None:
-                timestamps = cleaned_data['time'].values
-                
-                # 定義注入窗口（注入時間前後各30秒）
-                injection_window_start = self.inject_time - 30
-                injection_window_end = self.inject_time + 60
-                
-                # 優先採樣注入窗口內的數據
-                injection_data = cleaned_data[
-                    (cleaned_data['time'] >= injection_window_start) & 
-                    (cleaned_data['time'] <= injection_window_end)
-                ]
-                
-                if not injection_data.empty:
-                    print(f"Found {len(injection_data)} data points in injection window")
-                    
-                    # 2. 服務候選過濾：優先處理目標服務相關的列
-                    target_columns = self._get_target_service_columns(cleaned_data.columns)
-                    
-                    # 在注入窗口內密集採樣
-                    for idx, row in injection_data.iterrows():
-                        service_name = self._infer_service_name_with_priority(row, cleaned_data.columns, target_columns)
-                        
-                        # 如果有SLI，檢查該行是否包含SLI相關信息
-                        sli_weight = 1.0
-                        if self.sli and self.sli in row.index and not pd.isna(row[self.sli]):
-                            sli_weight = 2.0  # SLI相關事件權重加倍
-                        
-                        event = AtomicEvent(
-                            timestamp=row.get('time', idx),
-                            service_name=service_name,
-                            event_type='metrics',
-                            data_dict=row.to_dict()
-                        )
-                        
-                        # 根據權重決定是否重複添加（模擬重要性）
-                        for _ in range(int(sli_weight)):
-                            events.append(event)
-                
-                # 補充注入窗口外的數據（較少採樣）
-                non_injection_data = cleaned_data[
-                    ~((cleaned_data['time'] >= injection_window_start) & 
-                      (cleaned_data['time'] <= injection_window_end))
-                ]
-                
-                if not non_injection_data.empty:
-                    sample_rate = max(1, len(non_injection_data) // 20)  # 較稀疏採樣
-                    for idx, row in non_injection_data.iloc[::sample_rate].iterrows():
-                        target_columns = self._get_target_service_columns(cleaned_data.columns)
-                        service_name = self._infer_service_name_with_priority(row, cleaned_data.columns, target_columns)
-                        
-                        event = AtomicEvent(
-                            timestamp=row.get('time', idx),
-                            service_name=service_name,
-                            event_type='metrics',
-                            data_dict=row.to_dict()
-                        )
-                        events.append(event)
-            else:
-                # 降級到原始方法
-                return self.preprocess_and_extract_atomic_events(cleaned_data)
-            
-            print(f"Enhanced extraction: {len(events)} atomic events (with SLI binding)")
-            return events
-            
-        except Exception as e:
-            print(f"Warning: Enhanced extraction failed ({e}), falling back to standard method")
-            return self.preprocess_and_extract_atomic_events(raw_data)
-    
-    def _get_target_service_columns(self, columns: pd.Index) -> List[str]:
-        """獲取目標服務相關的列"""
-        target_columns = []
-        
-        if self.target_service:
-            for col in columns:
-                if col.startswith(self.target_service) or self.target_service in col:
-                    target_columns.append(col)
-        
-        # 如果沒有找到目標服務列，添加SLI相關列
-        if not target_columns and self.sli:
-            for col in columns:
-                if self.sli in col or col == self.sli:
-                    target_columns.append(col)
-        
-        return target_columns
-    
-    def _infer_service_name_with_priority(self, row: pd.Series, columns: pd.Index, target_columns: List[str]) -> str:
-        """優先使用目標服務候選的服務名稱推斷"""
-        # 1. 如果有明確的目標服務，優先返回
-        if self.target_service:
-            return self.target_service
-        
-        # 2. 檢查是否有目標服務相關的列
-        if target_columns:
-            for col in target_columns:
-                service_name = self._extract_service_from_column(col)
-                if service_name and service_name != 'unknown':
-                    return service_name
-        
-        # 3. 使用知識庫過濾服務候選
-        service_candidates = {}
-        for col in columns:
-            if col == 'time':
-                continue
-            
-            service_name = self._extract_service_from_column(col)
-            if service_name and service_name != 'unknown':
-                # 過濾掉不相關的服務（node、過多mongo等）
-                if self._is_relevant_service(service_name):
-                    service_candidates[service_name] = service_candidates.get(service_name, 0) + 1
-        
-        # 4. 返回最相關的服務
-        if service_candidates:
-            # 優先選擇關鍵服務
-            critical_services = {k: v for k, v in service_candidates.items() 
-                               if self._is_critical_service(k)}
-            
-            if critical_services:
-                return max(critical_services.items(), key=lambda x: x[1])[0]
-            else:
-                return max(service_candidates.items(), key=lambda x: x[1])[0]
-        
-        return self._infer_service_name_prioritized(row, columns)
-    
-    def _is_relevant_service(self, service_name: str) -> bool:
-        """檢查服務是否相關（過濾掉node、過多mongo等）"""
-        irrelevant_patterns = ['node-', '192-', 'localhost', 'unknown']
-        
-        for pattern in irrelevant_patterns:
-            if service_name.startswith(pattern):
-                return False
-        
-        # 限制mongo服務的數量（避免被大量mongo指標主導）
-        if '-mongo' in service_name or '_mongo' in service_name:
-            # 只保留與目標服務相關的mongo
-            if self.target_service and self.target_service in service_name:
-                return True
-            return False  # 其他mongo服務暫時過濾
-        
-        return True
     
     def _is_critical_service(self, service_name: str) -> bool:
         """檢查服務是否為關鍵服務"""
@@ -535,24 +300,6 @@ class AdaptiveCPGFramework:
         
         return False
     
-    def _infer_service_name(self, row: pd.Series, columns: pd.Index) -> str:
-        """從資料中推斷服務名稱 - 針對train-ticket優化"""
-        # 收集所有可能的服務名稱和計數
-        service_candidates = {}
-        
-        for col in columns:
-            if col == 'time':
-                continue
-            
-            service_name = self._extract_service_from_column(col)
-            if service_name and service_name != 'unknown':
-                service_candidates[service_name] = service_candidates.get(service_name, 0) + 1
-        
-        # 返回擁有最多指標的服務名稱
-        if service_candidates:
-            return max(service_candidates.items(), key=lambda x: x[1])[0]
-        
-        return 'unknown'
     
     def _extract_service_from_column(self, col_name: str) -> str:
         """從列名中提取服務名稱 - 支持train-ticket命名模式"""
@@ -600,9 +347,8 @@ class AdaptiveCPGFramework:
     
     def _infer_service_name_prioritized(self, row: pd.Series, columns: pd.Index) -> str:
         """優先選擇微服務而不是節點指標"""
-        # 收集微服務和節點指標
-        microservice_candidates = {}
-        node_candidates = {}
+        # 收集所有服務候選
+        service_candidates = {}
         
         for col in columns:
             if col == 'time':
@@ -610,26 +356,26 @@ class AdaptiveCPGFramework:
             
             service_name = self._extract_service_from_column(col)
             if service_name and service_name != 'unknown':
-                if service_name.startswith('node-'):
-                    # 節點指標
-                    clean_name = service_name[5:]  # 移除'node-'前綴
-                    node_candidates[clean_name] = node_candidates.get(clean_name, 0) + 1
-                else:
-                    # 微服務指標
-                    microservice_candidates[service_name] = microservice_candidates.get(service_name, 0) + 1
+                service_candidates[service_name] = service_candidates.get(service_name, 0) + 1
+        
+        if not service_candidates:
+            return 'unknown'
+        
+        # 優先級排序：微服務 > 節點指標
+        microservices = {k: v for k, v in service_candidates.items() if not k.startswith('node-')}
+        node_services = {k: v for k, v in service_candidates.items() if k.startswith('node-')}
         
         # 優先返回微服務，特別是train-ticket的ts-服務
-        if microservice_candidates:
-            # 對train-ticket，優先選擇ts-開頭的服務
-            ts_services = {k: v for k, v in microservice_candidates.items() if k.startswith('ts-')}
+        if microservices:
+            ts_services = {k: v for k, v in microservices.items() if k.startswith('ts-')}
             if ts_services:
                 return max(ts_services.items(), key=lambda x: x[1])[0]
             else:
-                return max(microservice_candidates.items(), key=lambda x: x[1])[0]
+                return max(microservices.items(), key=lambda x: x[1])[0]
         
         # 如果沒有微服務，才使用節點指標
-        if node_candidates:
-            return 'node-' + max(node_candidates.items(), key=lambda x: x[1])[0]
+        if node_services:
+            return max(node_services.items(), key=lambda x: x[1])[0]
         
         return 'unknown'
     
@@ -658,63 +404,21 @@ class AdaptiveCPGFramework:
             
             print(f"  Service {service_name}: Processing {len(events)} events")
             
-            # --- START: 修正聚合邏輯 ---
-            # 嘗試使用變點檢測
-            change_points = self.change_detector.detect_change_points(timestamps)
-            
+            # 簡化的窗口聚合邏輯
             windows = []
-            if not change_points or len(change_points) < 1:
-                # 如果沒有檢測到變點，則退化到固定時間窗口聚合
-                print(f"  Warning: No change points detected for service '{service_name}', using fixed-size windows")
-                
-                if len(events) <= 1:
-                    # 如果只有一個事件，直接作為一個窗口
-                    windows = [events]
-                else:
-                    # 使用固定時間窗口或固定數量窗口
-                    time_span = timestamps[-1] - timestamps[0] if len(timestamps) > 1 else 60
-                    
-                    if time_span > 0:
-                        # 基於時間的窗口 (每60秒一個窗口)
-                        window_size_sec = min(60, time_span / 3)  # 至少3個窗口
-                        current_time = timestamps[0]
-                        start_idx = 0
-                        
-                        for i in range(1, len(timestamps)):
-                            if timestamps[i] - current_time >= window_size_sec:
-                                if start_idx < i:
-                                    windows.append(events[start_idx:i])
-                                start_idx = i
-                                current_time = timestamps[i]
-                        
-                        # 添加最後一個窗口
-                        if start_idx < len(events):
-                            windows.append(events[start_idx:])
-                    else:
-                        # 基於數量的窗口 (確保至少3個窗口)
-                        target_windows = min(3, len(events))
-                        window_size = max(1, len(events) // target_windows)
-                        
-                        for i in range(0, len(events), window_size):
-                            window = events[i:i + window_size]
-                            if window:
-                                windows.append(window)
-            else:
-                # 正常使用變點檢測來分組
-                start_idx = 0
-                for cp in change_points:
-                    if cp > start_idx:
-                        windows.append(events[start_idx:cp])
-                        start_idx = cp
-                if start_idx < len(events):
-                    windows.append(events[start_idx:])
-            
-            # 確保至少有一個窗口
-            if not windows and events:
+            if len(events) <= 1:
                 windows = [events]
+            else:
+                # 使用固定數量窗口，確保至少2個窗口
+                target_windows = min(3, len(events))
+                window_size = max(1, len(events) // target_windows)
+                
+                for i in range(0, len(events), window_size):
+                    window = events[i:i + window_size]
+                    if window:
+                        windows.append(window)
             
             print(f"  Service {service_name}: Created {len(windows)} windows from {len(events)} events")
-            # --- 聚合事件生成 ---
             
             # 為每個窗口生成聚合事件
             for i, window in enumerate(windows):
@@ -765,8 +469,9 @@ class AdaptiveCPGFramework:
     def global_anomaly_detection(self, aggregated_events: List[AggregatedEvent]) -> List[AggregatedEvent]:
         """
         步驟3: 全域異常檢測 → 症狀集合 S
+        改進：基於數據驅動的症狀檢測，移除target_service依賴
         """
-        print("Step 3: Global Anomaly Detection")
+        print("Step 3: Global Anomaly Detection (Data-Driven)")
         
         if not aggregated_events:
             return []
@@ -839,21 +544,25 @@ class AdaptiveCPGFramework:
             combined_scores = 0.6 * iso_scores + 0.4 * z_scores
         # --- END: 增加健壯性檢查 ---
         
-        # 自適應閾值 - 放寬以提升準確度
+        for event, score in zip(aggregated_events, combined_scores):
+            event.anomaly_score = score
+        
+        # 自適應閾值 - 基於數據分布動態調整
         if len(combined_scores) == 1:
-            threshold = 0.3  # 單個樣本使用較低閾值
+            threshold = 0.3
             threshold_percentile = "fixed"
         else:
-            # 放寬閾值：從70-95%降到60-85%
-            threshold_percentile = max(60, min(85, 100 - 150/len(combined_scores)))  # 更寬鬆的百分位
+            # 動態調整分位數：數據越多，閾值越嚴格
+            percentile = max(70, min(90, 80 + len(combined_scores) * 0.1))
+            threshold_percentile = percentile
             threshold = np.percentile(combined_scores, threshold_percentile)
         
         print(f"Using threshold: {threshold:.4f} (percentile: {threshold_percentile})")
         
-        # 選擇症狀 - 確保最少症狀數
+        # 選擇症狀
         symptoms = []
-        for i, (event, score) in enumerate(zip(aggregated_events, combined_scores)):
-            if score > threshold:
+        for event, score in zip(aggregated_events, combined_scores):
+            if score >= threshold:
                 symptoms.append(event)
         
         # 確保至少有3個症狀（如果可能）
@@ -865,7 +574,14 @@ class AdaptiveCPGFramework:
             scored_events.sort(key=lambda x: x[1], reverse=True)
             symptoms = [event for event, _ in scored_events[:min_symptoms]]
         
-        print(f"Detected {len(symptoms)} symptoms from {len(aggregated_events)} events")
+        # 排序症狀按分數，最高分數的是主要症狀
+        symptoms.sort(key=lambda x: x.anomaly_score, reverse=True)
+        
+        if symptoms:
+            print(f"Detected {len(symptoms)} symptoms. Primary symptom: {symptoms[0].service_name} (score: {symptoms[0].anomaly_score:.3f})")
+        else:
+            print(f"Detected {len(symptoms)} symptoms from {len(aggregated_events)} events")
+        
         return symptoms
     
     def build_local_cpg(self, symptoms: List[AggregatedEvent], all_events: List[AggregatedEvent]) -> Tuple[set, set]:
@@ -912,24 +628,47 @@ class AdaptiveCPGFramework:
         return vertices, edges
     
     def _get_upstream_candidates(self, symptom: AggregatedEvent, all_events: List[AggregatedEvent]) -> List[AggregatedEvent]:
-        """獲取上游候選事件"""
+        """
+        獲取上游候選事件
+        改進：考慮時間延遲，優先選擇時間差在30-60秒的候選事件（模擬因果傳播延遲）
+        """
         candidates = []
+        candidates_with_priority = []  # (event, priority) 用於考慮時間延遲
         
         # 自適應回溯窗口
         lookback_window = self._adaptive_lookback(symptom)
+        
+        # 理想的因果傳播延遲範圍（30-60秒）
+        ideal_lag_min = 30
+        ideal_lag_max = 60
         
         for event in all_events:
             # 時間條件：事件發生在症狀之前或同時
             if event.timestamp <= symptom.timestamp and event.timestamp >= symptom.timestamp - lookback_window:
                 # 不同服務或同服務不同窗口
                 if event.service_name != symptom.service_name or event != symptom:
-                    candidates.append(event)
+                    # 計算時間差
+                    time_lag = symptom.timestamp - event.timestamp
+                    
+                    # 根據時間差給予優先級權重
+                    if ideal_lag_min <= time_lag <= ideal_lag_max:
+                        priority = 1.0  # 理想時間窗口內的候選
+                    elif time_lag < ideal_lag_min:
+                        priority = 0.8  # 時間差太小
+                    else:
+                        priority = 0.6  # 時間差較大
+                    
+                    candidates_with_priority.append((event, priority))
         
         # 如果找不到候選，放寬條件包含所有其他事件
-        if not candidates:
+        if not candidates_with_priority:
             for event in all_events:
                 if event != symptom:
-                    candidates.append(event)
+                    candidates_with_priority.append((event, 0.5))
+        
+        # 按優先級排序（時間延遲在理想範圍內的優先）
+        candidates_with_priority.sort(key=lambda x: x[1], reverse=True)
+        candidates = [event for event, _ in candidates_with_priority]
         
         return candidates
     
@@ -941,16 +680,22 @@ class AdaptiveCPGFramework:
             return min(max(feature_magnitude * 10, 60), 300)  # 60秒到5分鐘
         return 120  # 默認2分鐘
     
-    def quantify_root_causes(self, vertices: set, edges: set) -> Dict[str, float]:
+    def quantify_root_causes(self, vertices: set, edges: set, all_events: List[AggregatedEvent]) -> Dict[str, float]:
         """
         步驟5: 根因貢獻度量化
+        改進：融合圖結構、異常分數和服務優先級三個維度
+        
+        Final Score = w1 * GraphScore + w2 * AnomalyScore + w3 * PriorityScore
         """
         print("Step 5: Root Cause Contribution Quantification")
         
-        if not vertices or not edges:
+        if not vertices:
             return {}
         
-        # 建構有向圖
+        # 權重配置：可根據實際情況調整
+        w1, w2, w3 = 0.4, 0.4, 0.2  # 圖結構、異常程度、優先級
+        
+        # 1. 計算圖結構分數 (PageRank)
         G = nx.DiGraph()
         G.add_nodes_from(vertices)
         
@@ -959,22 +704,57 @@ class AdaptiveCPGFramework:
                 source, target, weight = edge[0], edge[1], edge[2]
                 G.add_edge(source, target, weight=weight)
         
-        # 使用PageRank計算重要性
-        ranker = PageRankImportanceCalculator(G)
-        windowed_scores = ranker.compute_importance()
+        # 直接使用 PageRank 計算節點重要性
+        try:
+            pagerank_scores = nx.pagerank(G, alpha=0.85) if G.nodes() else {}
+        except:
+            # 如果圖為空或有問題，返回平均分布
+            nodes = list(G.nodes())
+            pagerank_scores = {node: 1.0/len(nodes) for node in nodes} if nodes else {}
         
-        # 將窗口層級的分數匯總到服務層級
-        service_scores = {}
-        for window_name, score in windowed_scores.items():
-            # 移除 '_w' + 數字 的後綴
-            base_service_name = '_'.join(window_name.split('_')[:-1]) if '_w' in window_name else window_name
+        # 2. 獲取異常分數和優先級分數
+        event_scores = {}
+        for event in all_events:
+            if event.service_name in vertices:
+                # 提取基礎服務名
+                base_service_name = '_'.join(event.service_name.split('_')[:-1]) if '_w' in event.service_name else event.service_name
+                
+                if base_service_name not in event_scores:
+                    event_scores[base_service_name] = {
+                        "anomaly_score": 0.0,
+                        "priority_score": get_service_priority(base_service_name)
+                    }
+                
+                # 取該服務所有窗口中最大的異常分數
+                current_anomaly = getattr(event, 'anomaly_score', 0.0)
+                event_scores[base_service_name]["anomaly_score"] = max(
+                    current_anomaly,
+                    event_scores[base_service_name]["anomaly_score"]
+                )
+        
+        # 3. 融合分數
+        final_scores = {}
+        
+        for service_window in vertices:
+            # 提取基礎服務名
+            base_service_name = '_'.join(service_window.split('_')[:-1]) if '_w' in service_window else service_window
             
-            # 匯總分數，這裡我們取最大值，代表該服務最異常的時刻
-            if base_service_name not in service_scores or score > service_scores[base_service_name]:
-                service_scores[base_service_name] = score
+            # 獲取各維度分數
+            graph_score = pagerank_scores.get(service_window, 0.0)
+            anomaly_score = event_scores.get(base_service_name, {}).get("anomaly_score", 0.0)
+            priority_score = event_scores.get(base_service_name, {}).get("priority_score", 0.5)
+            
+            # 融合計算
+            final_score = (w1 * graph_score) + (w2 * anomaly_score) + (w3 * priority_score)
+            
+            # 匯總到服務層級（取最大值）
+            if base_service_name not in final_scores or final_score > final_scores[base_service_name]:
+                final_scores[base_service_name] = final_score
         
-        print(f"Computed importance scores for {len(windowed_scores)} windows, aggregated to {len(service_scores)} base services")
-        return service_scores
+        print(f"Computed scores for {len(final_scores)} base services")
+        print(f"Score composition: Graph={w1}, Anomaly={w2}, Priority={w3}")
+        
+        return final_scores
     
     def generate_narrative(self, root_scores: Dict[str, float], symptoms: List[AggregatedEvent], edges: set) -> Dict[str, Any]:
         """
@@ -1040,44 +820,34 @@ class AdaptiveCPGFramework:
     
 
 
-def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
+def cpg(data, inject_time=None, dataset=None, sli=None, **kwargs):
     """
-    CPG框架 - 支持SLI綁定和服務候選過濾
-    
+    CPG框架 
     Args:
         data: pd.DataFrame, 輸入數據
-        inject_time: 故障注入時間
+        inject_time: 故障注入時間（保留用於向後兼容，但不用於核心分析）
         dataset: 數據集名稱
-        sli: Service Level Indicator
+        sli: Service Level Indicator（保留用於向後兼容，但不用於核心分析）
         **kwargs: 其他參數
     
     Returns:
         Dict: 包含排名結果的字典
+            - ranks: 服務排名列表（按根因可能性降序）
+            - narrative: 故障敘事
+            - adj: 鄰接矩陣（為兼容性保留）
+            - node_names: 節點名稱列表
     """
     try:
-        print("=== Starting Adaptive CPG Framework ===")
+        print("=== Starting CPG Framework ===")
         
         # 預處理數據
         data = preprocess(data=data, dataset=dataset, dk_select_useful=kwargs.get("dk_select_useful", False))
         
-        # 從數據路徑推斷目標服務（如果可用）
-        target_service = kwargs.get("target_service", None)
-        args = kwargs.get("args", None)
-        data_path = ""
-        if args and hasattr(args, 'data_path'):
-            data_path = args.data_path
-        if not target_service and data_path:
-            target_service = _infer_target_service_from_path(data_path)
-            print(f"Inferred target service: {target_service} from path: {data_path}")
+        # 初始化框架(CPG)
+        cpg_framework = CPGFramework()
         
-        # 初始化框架(CPG) - 傳入增強參數
-        cpg_framework = AdaptiveCPGFramework()
-        cpg_framework.target_service = target_service
-        cpg_framework.sli = sli
-        cpg_framework.inject_time = inject_time
-        
-        # 步驟1: 前處理 & 原子事件提取（增強版）
-        atomic_events = cpg_framework.preprocess_and_extract_atomic_events_enhanced(data)
+        # 步驟1: 前處理 & 原子事件提取
+        atomic_events = cpg_framework.preprocess_and_extract_atomic_events(data)
         
         if not atomic_events:
             print("No atomic events extracted, returning random ranking")
@@ -1106,12 +876,18 @@ def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
         if not vertices:
             print("No CPG vertices found, returning symptom-based ranking")
             symptom_services = list(set(s.service_name for s in symptoms))
-            all_services = list(set(cpg_framework._infer_service_name_prioritized(row, data.columns) for _, row in data.iterrows()))
+            # 獲取所有服務名稱作為後備
+            all_services = set()
+            for col in data.columns:
+                if col != 'time':
+                    service_name = cpg_framework._extract_service_from_column(col)
+                    if service_name != 'unknown' and not service_name.startswith('node-'):
+                        all_services.add(service_name)
             remaining = [s for s in all_services if s not in symptom_services]
             return {"ranks": symptom_services + remaining}
         
         # 步驟5: 根因貢獻度量化
-        root_scores = cpg_framework.quantify_root_causes(vertices, edges)
+        root_scores = cpg_framework.quantify_root_causes(vertices, edges, aggregated_events)
         
         if not root_scores:
             print("No root cause scores computed, returning vertex-based ranking")
@@ -1124,19 +900,6 @@ def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
         # 生成最終排名 - 統一為服務層級
         sorted_services = sorted(root_scores.items(), key=lambda x: x[1], reverse=True)
         ranks = [service for service, _ in sorted_services]
-        
-        # 確保目標服務在排名中佔優勢位置
-        if target_service and target_service not in ranks:
-            # 如果目標服務不在CPG排名中，將其插入到前面
-            ranks.insert(0, target_service)
-            print(f"Inserted target service {target_service} at top of ranking")
-        elif target_service and target_service in ranks:
-            # 如果目標服務在CPG排名中但不在前3位，提升其位置
-            current_pos = ranks.index(target_service)
-            if current_pos > 2:
-                ranks.remove(target_service)
-                ranks.insert(0, target_service)
-                print(f"Promoted target service {target_service} from position {current_pos} to top")
         
         # 獲取數據中所有唯一的服務名稱
         all_service_names = set()
@@ -1179,7 +942,6 @@ def cpg_adaptive(data, inject_time=None, dataset=None, sli=None, **kwargs):
 
 
 # 為了兼容現有系統，創建別名
-cpg = cpg_adaptive
 
 if __name__ == "__main__":
     # 簡單測試
@@ -1200,6 +962,6 @@ if __name__ == "__main__":
     test_data.loc[80:90, 'service_a_cpu'] *= 2
     test_data.loc[85:95, 'service_c_latency'] *= 3
     
-    result = cpg_adaptive(test_data, inject_time=80, dataset="test")
+    result = cpg(test_data, inject_time=80, dataset="test")
     print(f"Test result: {result}")
     print("CPG Framework test completed!")
