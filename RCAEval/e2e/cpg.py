@@ -825,9 +825,9 @@ def cpg(data, inject_time=None, dataset=None, sli=None, **kwargs):
     CPG框架 
     Args:
         data: pd.DataFrame, 輸入數據
-        inject_time: 故障注入時間（保留用於向後兼容，但不用於核心分析）
+        inject_time: 故障注入時間
         dataset: 數據集名稱
-        sli: Service Level Indicator（保留用於向後兼容，但不用於核心分析）
+        sli: Service Level Indicator
         **kwargs: 其他參數
     
     Returns:
