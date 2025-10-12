@@ -57,7 +57,7 @@ if is_py310():
     from .run import run
     from .mscred import mscred
     from .tracerca import tracerca
-    from .cpg import cpg
+    from .cpg import cpg, cpg_adaptive
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd
