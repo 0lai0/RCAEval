@@ -63,9 +63,12 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
     # 數據預處理：移除常數列
     X_clean = X.copy()
     
-    # 移除常數列（標準差為0），但使用更寬鬆的閾值
-    std_mask = np.std(X_clean, axis=1) > 1e-8  # 更寬鬆的閾值
+    # 移除常數列（標準差為0），使用更嚴格的閾值
+    std_mask = np.std(X_clean, axis=1) > 1e-6  # 更嚴格的閾值，避免 tigramite 內部標準化失敗
     X_clean = X_clean[std_mask, :]
+    
+    print(f"After constant removal: {X_clean.shape[0]} variables remaining")
+    print(f"Remaining std values: {np.std(X_clean, axis=1)}")
     
     # 檢查是否還有足夠的變量
     if X_clean.shape[0] < 2:
@@ -75,9 +78,21 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
     if X_clean.shape[1] < tau_max + 2:
         raise ValueError(f"Time series too short: {X_clean.shape[1]} < {tau_max + 2}")
     
+    # 額外的數據預處理：確保每個變量都有足夠的變異
+    for i in range(X_clean.shape[0]):
+        var_std = np.std(X_clean[i, :])
+        if var_std < 1e-6:
+            # 如果變異太小，添加微小的隨機噪聲
+            noise = np.random.normal(0, 1e-6, X_clean.shape[1])
+            X_clean[i, :] = X_clean[i, :] + noise
+            print(f"Added noise to variable {i} (std was {var_std:.2e})")
+    
+    print(f"Final input matrix stats: min={X_clean.min():.6f}, max={X_clean.max():.6f}")
+    print(f"Final std values: {np.std(X_clean, axis=1)}")
+    
     # 創建 DataFrame 並運行 PCMCI
     dataframe = data_processing.DataFrame(X_clean)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
+    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=_ParCorr(significance="analytic"), verbosity=0)
     
     # 動態調整 max_conds_dim
     if max_conds_dim is None:
@@ -97,8 +112,14 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
             max_conds_px=None   # 可選：限制 X 的條件集
         )
     except Exception as e:
-        # 如果 PCMCI 失敗，返回空結果
+        # 如果 PCMCI 失敗，記錄詳細錯誤信息並返回空結果
         print(f"PCMCI failed: {e}")
+        print(f"Input matrix shape: {X_clean.shape}")
+        print(f"Input matrix stats: min={X_clean.min():.6f}, max={X_clean.max():.6f}")
+        print(f"Input matrix std: {np.std(X_clean, axis=1)}")
+        print(f"Contains NaN: {np.isnan(X_clean).any()}")
+        print(f"Contains Inf: {np.isinf(X_clean).any()}")
+        
         return {
             "p_matrix": np.ones((X_clean.shape[0], X_clean.shape[0], tau_max + 1)),
             "val_matrix": np.zeros((X_clean.shape[0], X_clean.shape[0], tau_max + 1)),

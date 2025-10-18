@@ -122,6 +122,19 @@ def robust_standardize_with_interpolation(series: pd.Series, eps: float = 1e-9) 
     # 使用魯棒統計量進行標準化
     med = series_interpolated.median()
     mad = (series_interpolated - med).abs().median()
+    
+    # 關鍵修復：確保 MAD 不會太小
+    if mad < eps:
+        # 如果 MAD 太小，使用標準差作為替代
+        std_val = series_interpolated.std()
+        if std_val < eps:
+            # 如果標準差也太小，添加微小的隨機噪聲
+            noise = np.random.normal(0, eps, len(series_interpolated))
+            series_interpolated = series_interpolated + noise
+            mad = (series_interpolated - series_interpolated.median()).abs().median()
+        else:
+            mad = std_val
+    
     denom = mad if abs(mad) > eps else eps
     
     return (series_interpolated - med) / denom
