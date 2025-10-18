@@ -7,6 +7,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+.venv310
+.venv39
 .Python
 build/
 develop-eggs/
@@ -223,3 +225,6 @@ output
 .DS_Store
 logparser/config.json
 logbatcher/config.json
+run_experiments*
+run_experiments_main*
+experiment_output
