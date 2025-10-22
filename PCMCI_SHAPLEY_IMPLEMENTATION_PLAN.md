@@ -1322,95 +1322,1034 @@ Steps    Steps    └─ Steps 14, 21, 27, 32, 36, 42, 47
 
 ---
 
-## 階段 K: 性能與準確度優化 (補充)
+## 階段 K: 聯合篩選器與高精度 Fallback 重構 (Steps 66-95)
 
-### Step 66: 實作增量式 PCMCI
-- **任務**: 對大規模資料實作增量/分塊 PCMCI
-- **策略**: 時間窗口滑動，避免一次處理全部數據
-- **預期提升**: 時間降低 50-70%
+### 核心理念
 
-### Step 67: 實作智能早停機制
-- **任務**: 當檢測到收斂時提前停止迭代
-- **應用**: Shapley 抽樣、異常傳播
-- **預期提升**: 時間降低 20-30%
+當前實作揭示了一個重要發現：
+1. **PCMCI 頻繁失敗**導致 Fallback 機制被大量觸發
+2. **Fallback 異常分數表現驚人**：Avg@5-DISK=1.0, Avg@5-SOCKET=0.97
+3. **新策略**：將高精度 Fallback 與 SPOT 極值理論結合，形成「聯合篩選器」
 
-### Step 68: 實作結果快取
-- **任務**: 對重複查詢快取結果
-- **策略**: 基於數據指紋的 LRU 快取
-- **預期提升**: 重複實驗速度提升 10 倍
+### 設計目標
+
+1. **修復 PCMCI 穩定性**：解決常數列和數據質量問題
+2. **實現聯合篩選器**：Fallback 異常分數 + SPOT 極值理論
+3. **優化工作流程**：篩選 → 因果建圖 → 歸因分析
 
 ---
 
-## 更新後的時間估算
+### 子階段 K1: PCMCI 穩定性增強 (Steps 66-70) ✅
 
-- **階段 J (Steps 51-65)**: 12-15 小時
-  - Steps 51-54 (PCMCI 穩健性): 4-5 小時
-  - Steps 55-57 (降級策略): 3-4 小時
-  - Steps 58-60 (性能優化): 3-4 小時
-  - Steps 61-65 (調優與測試): 2-3 小時
-- **階段 K (Steps 66-68, 可選)**: 3-4 小時
+#### Step 66: 實作數據驗證前處理器
+- **任務**: 在 PCMCI 執行前進行嚴格的數據驗證
+- **檔案**: `pcmci_shapley_modules/pcmci_local.py`
+- **函數**: `validate_and_clean_for_pcmci(df: pd.DataFrame, columns: list, config: Config) -> tuple`
+- **依賴**: Step 27
+- **內容**:
+  ```python
+  def validate_and_clean_for_pcmci(df, columns, config):
+      """
+      返回: (cleaned_df, valid_columns, diagnostics)
+      """
+      diagnostics = {
+          'removed_constant': [],
+          'removed_low_variance': [],
+          'removed_collinear': [],
+          'nan_handled': 0,
+          'input_shape': df.shape,
+          'output_shape': None
+      }
+      
+      # 1. 檢測並移除常數列（方差 < 1e-9）
+      variances = df.var()
+      constant_cols = variances[variances < 1e-9].index.tolist()
+      diagnostics['removed_constant'] = constant_cols
+      df_clean = df.drop(columns=constant_cols)
+      
+      # 2. 檢測並移除低變異列（變異係數 < 0.01）
+      cv = df_clean.std() / (df_clean.mean().abs() + 1e-10)
+      low_var_cols = cv[cv < 0.01].index.tolist()
+      diagnostics['removed_low_variance'] = low_var_cols
+      df_clean = df_clean.drop(columns=low_var_cols)
+      
+      # 3. 處理 NaN 值（前向填充 + 後向填充 + 零填充）
+      nan_count = df_clean.isna().sum().sum()
+      df_clean = df_clean.fillna(method='ffill').fillna(method='bfill').fillna(0)
+      diagnostics['nan_handled'] = nan_count
+      
+      # 4. 檢測共線性（相關係數 > 0.99）
+      if len(df_clean.columns) > 1:
+          corr_matrix = df_clean.corr().abs()
+          upper_tri = corr_matrix.where(
+              np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+          )
+          collinear_cols = [
+              col for col in upper_tri.columns 
+              if any(upper_tri[col] > 0.99)
+          ]
+          diagnostics['removed_collinear'] = collinear_cols[:len(collinear_cols)//2]
+          df_clean = df_clean.drop(columns=diagnostics['removed_collinear'])
+      
+      diagnostics['output_shape'] = df_clean.shape
+      valid_columns = df_clean.columns.tolist()
+      
+      return df_clean, valid_columns, diagnostics
+  ```
+- **目標**: 確保送入 PCMCI 的數據至少有 2 個有效變量，且無常數列
+- **驗證**: 
+  - 測試全常數數據：應返回空列表
+  - 測試部分常數：應正確移除
+  - 測試 NaN 數據：應完全填充
+- **Risks**: 過度清理可能導致節點數不足
+- **是否完成**: O
 
-**新增總計**: 約 15-19 小時（2-3 個工作日）
+#### Step 67: 實作 PCMCI 多策略執行器
+- **任務**: 實現漸進式降級策略
+- **檔案**: `pcmci_shapley_modules/pcmci_local.py`
+- **函數**: `run_pcmci_with_progressive_fallback(df: pd.DataFrame, columns: list, config: Config) -> dict`
+- **依賴**: Step 66
+- **內容**:
+  ```python
+  def run_pcmci_with_progressive_fallback(df, columns, config):
+      """
+      策略優先序:
+      1. 標準 PCMCI+ (alpha=0.05, tau_max=5, max_conds_dim=3)
+      2. 寬鬆 PCMCI (alpha=0.1, tau_max=3, max_conds_dim=2)
+      3. 極寬鬆 PCMCI (alpha=0.2, tau_max=2, max_conds_dim=1)
+      4. 簡單滯後相關 (Pearson + 顯著性檢定)
+      5. 空圖（返回空邊集合但保留節點）
+      """
+      strategies = [
+          {'name': 'standard', 'alpha': 0.05, 'tau_max': 5, 'max_conds_dim': 3},
+          {'name': 'relaxed', 'alpha': 0.1, 'tau_max': 3, 'max_conds_dim': 2},
+          {'name': 'very_relaxed', 'alpha': 0.2, 'tau_max': 2, 'max_conds_dim': 1},
+      ]
+      
+      for strategy in strategies:
+          try:
+              logger.info(f"Trying PCMCI strategy: {strategy['name']}")
+              result = run_pcmci_plus(
+                  df, 
+                  tau_max=strategy['tau_max'],
+                  alpha=strategy['alpha'],
+                  max_conds_dim=strategy['max_conds_dim']
+              )
+              logger.info(f"PCMCI succeeded with strategy: {strategy['name']}")
+              result['strategy_used'] = strategy['name']
+              return result
+          except Exception as e:
+              logger.warning(f"PCMCI strategy {strategy['name']} failed: {e}")
+              continue
+      
+      # 最後降級到簡單相關性
+      logger.warning("All PCMCI strategies failed, using lagged correlation")
+      return fallback_to_lagged_correlation(df, columns, config)
+  ```
+- **目標**: PCMCI 成功率 > 80%
+- **驗證**: 在所有測試數據集上運行，記錄策略使用分佈
+- **Risks**: 過度降級影響因果推斷質量
+- **是否完成**: O
 
-**項目總計**: 約 47-60 小時（6-8 個工作日）
+#### Step 68: 實作簡單相關性降級方法
+- **任務**: 當 PCMCI 完全失敗時的因果代理
+- **檔案**: `pcmci_shapley_modules/pcmci_local.py`
+- **函數**: `fallback_to_lagged_correlation(df: pd.DataFrame, columns: list, config: Config) -> dict`
+- **依賴**: Step 67
+- **內容**:
+  ```python
+  def fallback_to_lagged_correlation(df, columns, config):
+      """
+      使用滯後相關性作為因果關係的代理
+      保持與 PCMCI 相同的輸出格式
+      """
+      edges = []
+      edge_strengths = {}
+      
+      for i, col_i in enumerate(columns):
+          for j, col_j in enumerate(columns):
+              if i == j:
+                  continue
+              
+              # 計算滯後相關性
+              max_corr = 0.0
+              best_tau = 0
+              for tau in range(1, config.tau_max + 1):
+                  if len(df) <= tau:
+                      continue
+                  
+                  x = df[col_i].values[:-tau]
+                  y = df[col_j].values[tau:]
+                  
+                  if np.std(x) > 0 and np.std(y) > 0:
+                      corr = abs(np.corrcoef(x, y)[0, 1])
+                      if corr > max_corr:
+                          max_corr = corr
+                          best_tau = tau
+              
+              # 使用閾值篩選（相當於 alpha 檢定）
+              threshold = 0.3  # 可調整
+              if max_corr > threshold:
+                  edges.append((i, j, best_tau))
+                  edge_strengths[(i, j)] = max_corr
+      
+      return {
+          'edges': edges,
+          'edge_strengths': edge_strengths,
+          'columns': columns,
+          'strategy_used': 'lagged_correlation'
+      }
+  ```
+- **目標**: 提供最後的安全網
+- **驗證**: 與 PCMCI 結果比較一致性（在 PCMCI 可用時）
+- **Risks**: 相關性不等於因果性
+- **是否完成**: O
+
+#### Step 69: 更新主流程中的 PCMCI 調用
+- **任務**: 在 `pcmci_shapley.py` 中集成新的驗證和降級邏輯
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Steps 66-68
+- **內容**:
+  ```python
+  # 替換原有的 PCMCI 調用
+  service_df = pd.DataFrame({s: node_anomaly_ts.get(s, pd.Series(dtype=float)).values for s in U})
+  
+  # 新增：數據驗證和清理
+  service_df_clean, valid_columns, diagnostics = pcmci_mod.validate_and_clean_for_pcmci(
+      service_df, list(service_df.columns), cfg
+  )
+  logger.info(f"Data validation: {diagnostics}")
+  
+  if len(valid_columns) < 2:
+      logger.warning(f"Insufficient valid columns ({len(valid_columns)}), triggering empty graph")
+      pcmci_res = {'edges': [], 'edge_strengths': {}, 'columns': valid_columns, 'strategy_used': 'empty'}
+  else:
+      logger.info(f"PCMCI input shape after cleaning: {service_df_clean.shape}")
+      pcmci_res = pcmci_mod.run_pcmci_with_progressive_fallback(
+          service_df_clean, valid_columns, cfg
+      )
+      logger.info(f"PCMCI completed with strategy: {pcmci_res.get('strategy_used', 'unknown')}")
+  ```
+- **目標**: 減少 PCMCI 失敗率到 < 20%
+- **驗證**: 運行完整測試套件，檢查失敗率
+- **Risks**: 增加代碼複雜度
+- **是否完成**: O
+
+#### Step 70: 批量驗證 PCMCI 穩定性
+- **任務**: 在所有數據集上測試改進效果
+- **檔案**: `tests/test_pcmci_stability.py`
+- **依賴**: Step 69
+- **內容**:
+  - 運行所有 RCAEval 數據集
+  - 記錄每個數據集的 PCMCI 策略使用情況
+  - 統計失敗率、降級率
+  - 生成穩定性報告
+- **目標**:
+  - PCMCI 成功率（使用任意策略）> 80%
+  - 空圖率 < 20%
+- **驗證**: 與修改前的日誌對比
+- **Risks**: 某些數據集可能天生不適合 PCMCI
+- **是否完成**: O
 
 ---
 
-## 更新後的驗收標準
+### 子階段 K2: SPOT 極值理論集成 (Steps 71-75) ✅
 
-原有標準保持，新增：
-9. PCMCI fallback 觸發率 < 20%
-10. 不同資料集準確度變異係數 > 0.3
-11. 平均執行時間 < 5 分鐘（online-boutique）
-12. 平均執行時間 < 15 分鐘（train-ticket）
-13. 所有邊緣情況測試通過
-14. 穩健性測試覆蓋率 > 90%
+#### Step 71: 研究並選擇 SPOT 實現
+- **任務**: 選擇合適的 SPOT 算法實現
+- **檔案**: 文檔
+- **依賴**: 無
+- **內容**:
+  - 評估現有庫：`pyod`, `spot`, `adtk`
+  - 決定自己實現或使用第三方庫
+  - 確定 SPOT 參數：初始窗口大小、風險參數 q
+- **目標**: 選定實現方案
+- **驗證**: 在樣本數據上測試 SPOT 效果
+- **Risks**: 第三方庫可能不穩定或不兼容
+- **是否完成**: O
+
+#### Step 72: 實作 SPOT 異常檢測模組
+- **任務**: 實現 SPOT 極值理論異常檢測
+- **檔案**: `pcmci_shapley_modules/spot_detector.py` (新文件)
+- **函數**: `spot_anomaly_detection(data: pd.DataFrame, config: Config) -> pd.DataFrame`
+- **依賴**: Step 71
+- **內容**:
+  ```python
+  def spot_anomaly_detection(data: pd.DataFrame, config: Config) -> pd.DataFrame:
+      """
+      對每個時間序列應用 SPOT 算法
+      
+      Returns:
+          DataFrame: 每個指標的 SPOT 異常分數（罕見度）
+      """
+      from pyod.models.spot import SPOT  # 假設使用 pyod
+      
+      spot_scores = {}
+      for col in data.columns:
+          if col == 'time':
+              continue
+          
+          series = data[col].values
+          
+          # 初始化 SPOT
+          spot = SPOT(q=config.spot_risk_param)  # q=0.001 表示 0.1% 的極值
+          spot.fit(series[:config.spot_init_window])
+          
+          # 在線檢測
+          scores = []
+          for i in range(config.spot_init_window, len(series)):
+              spot.step(series[i])
+              score = spot.probability(series[i])  # 返回 p-value 或罕見度
+              scores.append(1 - score)  # 轉為異常分數
+          
+          # 填充初始窗口
+          full_scores = [0.0] * config.spot_init_window + scores
+          spot_scores[col] = full_scores
+      
+      result = pd.DataFrame(spot_scores)
+      if 'time' in data.columns:
+          result.insert(0, 'time', data['time'].values)
+      
+      return result
+  ```
+- **目標**: 為每個指標生成 SPOT 異常分數
+- **驗證**: 
+  - 測試能夠捕捉極端值
+  - 測試對正常波動的容忍度
+- **Risks**: 參數敏感，需要調優
+- **是否完成**: O
+
+#### Step 73: 實作節點級 SPOT 聚合
+- **任務**: 將指標級 SPOT 分數聚合到服務級
+- **檔案**: `pcmci_shapley_modules/spot_detector.py`
+- **函數**: `aggregate_spot_scores(spot_df: pd.DataFrame, metric_map: dict) -> pd.Series`
+- **依賴**: Step 72
+- **內容**:
+  ```python
+  def aggregate_spot_scores(spot_df: pd.DataFrame, metric_map: dict) -> pd.Series:
+      """
+      與 aggregate_node_anomaly 類似的邏輯
+      使用最後時間點的分數（或最大值）
+      """
+      scores = {}
+      for service, metrics in metric_map.items():
+          cols = [m for m in metrics if m in spot_df.columns]
+          if not cols:
+              scores[service] = 0.0
+              continue
+          
+          # 使用最後時間點的最大 SPOT 分數
+          scores[service] = spot_df[cols].iloc[-1].max()
+      
+      return pd.Series(scores)
+  ```
+- **目標**: 每個服務有一個 SPOT 罕見度分數
+- **驗證**: 分數分佈合理（大部分接近 0，少數接近 1）
+- **Risks**: 聚合策略可能不最優
+- **是否完成**: O
+
+#### Step 74: 集成 SPOT 到預處理流程
+- **任務**: 在 `preprocess_data` 中添加 SPOT 分析
+- **檔案**: `pcmci_shapley_modules/preprocessing.py`
+- **依賴**: Step 73
+- **內容**:
+  ```python
+  def preprocess_data(data: pd.DataFrame, config: PCMCIShapleyConfig) -> Dict[str, Any]:
+      # ... 現有邏輯 ...
+      
+      # 新增：SPOT 極值理論分析
+      if config.enable_spot:
+          from .spot_detector import spot_anomaly_detection, aggregate_spot_scores
+          
+          spot_scores_df = spot_anomaly_detection(norm, config)
+          node_spot = aggregate_spot_scores(spot_scores_df, metric_map)
+      else:
+          spot_scores_df = None
+          node_spot = pd.Series({s: 0.0 for s in metric_map.keys()})
+      
+      return {
+          'normalized_df': norm,
+          'anomaly_scores': anomalies,
+          'node_anomaly': node_anomaly,
+          'node_anomaly_ts': node_anomaly_ts,
+          'metric_mapping': metric_map,
+          'spot_scores': spot_scores_df,  # 新增
+          'node_spot': node_spot,  # 新增
+      }
+  ```
+- **目標**: 預處理輸出包含 SPOT 分數
+- **驗證**: 檢查輸出結構正確
+- **Risks**: 增加預處理時間
+- **是否完成**: O
+
+#### Step 75: 添加 SPOT 配置參數
+- **任務**: 在配置類中添加 SPOT 相關參數
+- **檔案**: `pcmci_shapley_modules/config.py`
+- **依賴**: Step 71
+- **內容**:
+  ```python
+  @dataclass
+  class PCMCIShapleyConfig:
+      # ... 現有參數 ...
+      
+      # SPOT 極值理論參數（新增）
+      enable_spot: bool = True
+      spot_risk_param: float = 0.001  # q 參數：0.001 表示捕捉 0.1% 的極值
+      spot_init_window: int = 200  # 初始訓練窗口大小
+      spot_depth: int = 10  # 極值池深度
+      
+      # 聯合篩選器參數（新增）
+      joint_screener_enabled: bool = True
+      joint_weight_fallback: float = 0.5  # Fallback 異常分數權重
+      joint_weight_spot: float = 0.5  # SPOT 罕見度權重
+      joint_top_n: int = 15  # 篩選後保留的節點數
+  ```
+- **目標**: 可配置 SPOT 行為
+- **驗證**: 參數驗證通過
+- **Risks**: 參數過多增加複雜度
+- **是否完成**: O
 
 ---
 
-## 補充的技術難點與解決方案
+### 子階段 K3: 聯合篩選器實現 (Steps 76-80) ✅
 
-### 難點 5: PCMCI 在真實數據上頻繁失敗
-- **問題**: 常數列、NaN、低變異性導致標準化失敗
-- **解決**:
-  1. 多層數據品質檢查
-  2. 多策略降級執行
-  3. 替代因果推斷方法
-  4. 智能參數自適應
+#### Step 76: 實作聯合篩選器核心邏輯
+- **任務**: 實現 Fallback + SPOT 的加權融合
+- **檔案**: `pcmci_shapley_modules/joint_screener.py` (新文件)
+- **函數**: `joint_screening(node_anomaly: pd.Series, node_spot: pd.Series, config: Config) -> tuple`
+- **依賴**: Steps 74, 75
+- **內容**:
+  ```python
+  def joint_screening(
+      node_anomaly: pd.Series, 
+      node_spot: pd.Series, 
+      config: Config
+  ) -> tuple[list, dict]:
+      """
+      聯合篩選器：Fallback 異常分數 + SPOT 罕見度
+      
+      Returns:
+          (selected_nodes, fusion_scores)
+      """
+      from .utils import min_max_normalize
+      
+      # 1. 歸一化兩個分數
+      anomaly_norm = min_max_normalize(node_anomaly.to_dict())
+      spot_norm = min_max_normalize(node_spot.to_dict())
+      
+      # 2. 加權融合
+      all_nodes = set(anomaly_norm.keys()) | set(spot_norm.keys())
+      fusion_scores = {}
+      for node in all_nodes:
+          score_a = anomaly_norm.get(node, 0.0)
+          score_s = spot_norm.get(node, 0.0)
+          fusion_scores[node] = (
+              config.joint_weight_fallback * score_a + 
+              config.joint_weight_spot * score_s
+          )
+      
+      # 3. 排序並選擇 Top-N
+      sorted_nodes = sorted(fusion_scores.items(), key=lambda x: x[1], reverse=True)
+      selected_nodes = [node for node, _ in sorted_nodes[:config.joint_top_n]]
+      
+      logger.info(f"Joint screener: {len(all_nodes)} -> {len(selected_nodes)} nodes")
+      logger.info(f"Top-5 fusion scores: {dict(sorted_nodes[:5])}")
+      
+      return selected_nodes, fusion_scores
+  ```
+- **目標**: 輸出高質量候選節點集
+- **驗證**: 
+  - 測試融合分數合理性
+  - 測試選出的節點包含真實根因（在已知根因的數據集上）
+- **Risks**: 權重選擇可能不最優
+- **是否完成**: O
 
-### 難點 6: Fallback 導致準確度相同
-- **問題**: 空圖情況下評分機制失效
-- **解決**:
-  1. 改善邊融合降級策略
-  2. 統計鄰域傳播作為替代
-  3. 動態評分權重調整
-  4. 保證至少部分圖結構存在
+#### Step 77: 集成聯合篩選器到主流程
+- **任務**: 在 `pcmci_shapley.py` 中使用聯合篩選器
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Step 76
+- **內容**:
+  ```python
+  # 在步驟 2.5（剪枝）之後，步驟 3（焦點節點確定）之前
+  
+  # 2.7) 聯合篩選器（可選，與剪枝二選一或組合使用）
+  if cfg.joint_screener_enabled:
+      from .pcmci_shapley_modules import joint_screener as js_mod
+      
+      screened_nodes, fusion_scores = js_mod.joint_screening(
+          pp.get("node_anomaly", pd.Series()),
+          pp.get("node_spot", pd.Series()),
+          cfg
+      )
+      
+      logger.info(f"Joint screening: {len(pp.get('metric_mapping', {}))} -> {len(screened_nodes)} nodes")
+      
+      # 更新 node_anomaly_ts 只保留篩選後的節點
+      node_anomaly_ts_original = pp.get("node_anomaly_ts", {})
+      node_anomaly_ts = {k: v for k, v in node_anomaly_ts_original.items() 
+                         if k in screened_nodes}
+  else:
+      # 使用原有的剪枝邏輯
+      node_anomaly_ts = pp.get("node_anomaly_ts", {})
+  ```
+- **目標**: 減少送入 PCMCI 的節點數，提高質量
+- **驗證**: 
+  - 檢查篩選後節點數量合理
+  - 檢查 PCMCI 成功率是否提升
+- **Risks**: 可能誤殺重要節點
+- **是否完成**: O
 
-### 難點 7: 大資料集性能瓶頸
-- **問題**: 31 節點需要 2+ 小時
-- **解決**:
-  1. 動態節點數量調整
-  2. PCMCI 參數優化（max_conds_dim）
-  3. Shapley 抽樣數量自適應
-  4. 快取和早停機制
+#### Step 78: 實作篩選器效果評估工具
+- **任務**: 評估聯合篩選器的效果
+- **檔案**: `pcmci_shapley_modules/joint_screener.py`
+- **函數**: `evaluate_screening_quality(selected_nodes: list, ground_truth: str, all_nodes: list) -> dict`
+- **依賴**: Step 76
+- **內容**:
+  ```python
+  def evaluate_screening_quality(
+      selected_nodes: list, 
+      ground_truth: str, 
+      all_nodes: list
+  ) -> dict:
+      """
+      評估篩選器質量
+      
+      Returns:
+          metrics: {
+              'recall': 是否包含真實根因,
+              'reduction_rate': 節點減少比例,
+              'top_rank': 真實根因的排名
+          }
+      """
+      metrics = {}
+      
+      # Recall: 真實根因是否被選中
+      metrics['recall'] = 1.0 if ground_truth in selected_nodes else 0.0
+      
+      # Reduction rate: 減少了多少節點
+      metrics['reduction_rate'] = 1 - len(selected_nodes) / max(len(all_nodes), 1)
+      
+      # Top rank: 真實根因在選中節點中的排名
+      if ground_truth in selected_nodes:
+          metrics['top_rank'] = selected_nodes.index(ground_truth) + 1
+      else:
+          metrics['top_rank'] = len(selected_nodes) + 1
+      
+      return metrics
+  ```
+- **目標**: 量化篩選器質量
+- **驗證**: 在測試數據集上運行
+- **Risks**: 需要已知根因的數據集
+- **是否完成**: O
+
+#### Step 79: 實作篩選器可視化
+- **任務**: 可視化篩選過程
+- **檔案**: `pcmci_shapley_modules/joint_screener.py`
+- **函數**: `visualize_screening(anomaly_scores: dict, spot_scores: dict, fusion_scores: dict, selected_nodes: list) -> None`
+- **依賴**: Step 76
+- **內容**:
+  - 繪製三個分數的散點圖
+  - 標記被選中和未被選中的節點
+  - 突出顯示真實根因（如果已知）
+- **目標**: 幫助理解篩選邏輯
+- **驗證**: 生成可讀的可視化圖表
+- **Risks**: 可選功能，非必需
+- **是否完成**: O
+
+#### Step 80: 批量測試聯合篩選器
+- **任務**: 在所有數據集上測試篩選器效果
+- **檔案**: `tests/test_joint_screener.py`
+- **依賴**: Steps 76-78
+- **內容**:
+  - 運行所有數據集
+  - 記錄篩選前後的節點數
+  - 記錄 Recall（真實根因保留率）
+  - 記錄 PCMCI 成功率變化
+  - 生成對比報告
+- **目標**:
+  - Recall > 95%（真實根因幾乎總是被保留）
+  - 節點減少率 > 50%
+  - PCMCI 成功率提升
+- **驗證**: 與未使用篩選器的版本對比
+- **Risks**: 某些數據集可能不適合激進篩選
+- **是否完成**: O
 
 ---
 
-## 實作優先順序更新
+### 子階段 K4: Fallback 機制優化 (Steps 81-85) ✅
 
-### 第一階段（核心功能）- 已完成
-- Steps 1-50: 基礎實作
+#### Step 81: 重新設計 Fallback 觸發邏輯
+- **任務**: 更智能的 Fallback 觸發條件
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Steps 69, 77
+- **內容**:
+  ```python
+  # 原有觸發條件
+  # fallback_triggered = (not metric_ranks or all(mr is None for mr in metric_ranks)) or total_weight == 0.0
+  
+  # 新的觸發條件（更細緻）
+  def should_trigger_fallback(pcmci_res, norm_w, metric_ranks, cfg):
+      """
+      決定是否觸發 Fallback
+      
+      Returns:
+          (should_fallback: bool, reason: str)
+      """
+      reasons = []
+      
+      # 1. PCMCI 完全失敗（空圖）
+      if len(pcmci_res['edges']) == 0:
+          reasons.append("pcmci_empty")
+      
+      # 2. 融合後權重總和為 0
+      total_weight = sum(norm_w.values()) if norm_w else 0.0
+      if total_weight == 0.0:
+          reasons.append("total_weight_zero")
+      
+      # 3. 圖過於稀疏（邊數 < 節點數 / 2）
+      num_nodes = len(set([i for i, j in norm_w.keys()] + [j for i, j in norm_w.keys()]))
+      if len(norm_w) < num_nodes / 2:
+          reasons.append("graph_too_sparse")
+      
+      # 4. metric_ranks 為空或全 None
+      if not metric_ranks or all(mr is None for mr in metric_ranks):
+          reasons.append("metric_ranks_invalid")
+      
+      # 5. 使用了非標準 PCMCI 策略
+      if pcmci_res.get('strategy_used') in ['very_relaxed', 'lagged_correlation', 'empty']:
+          reasons.append(f"pcmci_degraded_{pcmci_res.get('strategy_used')}")
+      
+      # 決策：如果有任何一個嚴重原因，觸發 Fallback
+      severe_reasons = ['pcmci_empty', 'total_weight_zero', 'metric_ranks_invalid']
+      should_fallback = any(r in reasons for r in severe_reasons)
+      
+      # 如果圖稀疏但不為空，可以考慮部分 Fallback（混合模式）
+      if 'graph_too_sparse' in reasons and not should_fallback:
+          should_fallback = cfg.fallback_on_sparse_graph
+          reasons.append("sparse_graph_policy")
+      
+      reason_str = ", ".join(reasons) if reasons else "none"
+      return should_fallback, reason_str
+  ```
+- **目標**: 更精確地判斷何時需要 Fallback
+- **驗證**: 測試各種邊緣情況
+- **Risks**: 邏輯過於複雜
+- **是否完成**: O
 
-### 第二階段（穩健性增強）- **當務之急**
-- Steps 51-54: PCMCI 數據處理和降級
-- Steps 55-57: 降級策略和替代方案
-- Step 64: 自動化測試
+#### Step 82: 實作混合模式（部分 Fallback）
+- **任務**: 當圖稀疏但不為空時，混合使用 PCMCI 和 Fallback
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Step 81
+- **內容**:
+  ```python
+  def hybrid_ranking(
+      ranks_from_pcmci: list,
+      ranks_from_fallback: list,
+      pcmci_confidence: float,
+      cfg: Config
+  ) -> list:
+      """
+      混合排序：根據 PCMCI 信心度混合兩種排序
+      
+      Args:
+          pcmci_confidence: 0-1，表示對 PCMCI 結果的信心
+          cfg.hybrid_threshold: 當 confidence < threshold 時使用混合
+      """
+      if pcmci_confidence >= cfg.hybrid_confidence_threshold:
+          # 高信心，使用 PCMCI 排序
+          return ranks_from_pcmci
+      elif pcmci_confidence <= 1 - cfg.hybrid_confidence_threshold:
+          # 低信心，使用 Fallback 排序
+          return ranks_from_fallback
+      else:
+          # 中等信心，混合排序
+          # 策略：交錯選擇，PCMCI 優先
+          hybrid = []
+          i, j = 0, 0
+          while i < len(ranks_from_pcmci) or j < len(ranks_from_fallback):
+              if i < len(ranks_from_pcmci) and ranks_from_pcmci[i] not in hybrid:
+                  hybrid.append(ranks_from_pcmci[i])
+              i += 1
+              if j < len(ranks_from_fallback) and ranks_from_fallback[j] not in hybrid:
+                  hybrid.append(ranks_from_fallback[j])
+              j += 1
+          return hybrid
+  ```
+- **目標**: 更靈活地利用兩種方法的優勢
+- **驗證**: 在稀疏圖數據上測試
+- **Risks**: 增加複雜度，可能不一定提升效果
+- **是否完成**: O
 
-### 第三階段（性能優化）
-- Steps 58-60: 參數調整和性能優化
-- Steps 66-68: 進階優化
+#### Step 83: 優化 Fallback 異常分數計算
+- **任務**: 改進 Fallback 使用的異常分數
+- **檔案**: `pcmci_shapley_modules/preprocessing.py`
+- **依賴**: Step 14
+- **內容**:
+  - 考慮時間維度：不僅使用最後時間點，還考慮異常持續時間
+  - 考慮異常強度：峰值 vs 平均值
+  - 考慮異常模式：突增 vs 持續異常
+  ```python
+  def enhanced_anomaly_score(anomaly_ts: pd.Series, timestamp: int) -> float:
+      """
+      增強的異常分數計算
+      
+      考慮：
+      1. 最後時間點分數（即時性）
+      2. 近期平均分數（持續性）
+      3. 近期最大分數（嚴重性）
+      4. 異常突增程度（變化率）
+      """
+      if len(anomaly_ts) == 0:
+          return 0.0
+      
+      # 1. 即時性：最後時間點
+      instant_score = anomaly_ts.iloc[-1] if len(anomaly_ts) > 0 else 0.0
+      
+      # 2. 持續性：最近 10 個時間點的平均
+      window = min(10, len(anomaly_ts))
+      persistent_score = anomaly_ts.iloc[-window:].mean()
+      
+      # 3. 嚴重性：最近 10 個時間點的最大值
+      severity_score = anomaly_ts.iloc[-window:].max()
+      
+      # 4. 變化率：最後時間點相對於之前的變化
+      if len(anomaly_ts) >= 2:
+          prev_avg = anomaly_ts.iloc[-window:-1].mean()
+          change_rate = (instant_score - prev_avg) / (prev_avg + 1e-10)
+          change_score = min(1.0, max(0.0, change_rate))
+      else:
+          change_score = 0.0
+      
+      # 加權融合
+      final_score = (
+          0.4 * instant_score +
+          0.3 * persistent_score +
+          0.2 * severity_score +
+          0.1 * change_score
+      )
+      
+      return final_score
+  ```
+- **目標**: 提高 Fallback 排序的準確性
+- **驗證**: 對比原有和增強版本的 Avg@K 指標
+- **Risks**: 過度工程化
+- **是否完成**: O
 
-### 第四階段（調優與驗證）
-- Steps 61-63: 超參數調優
-- Step 65: 批量驗證
+#### Step 84: 實作 Fallback 置信度評估
+- **任務**: 評估 Fallback 結果的可靠性
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Step 83
+- **內容**:
+  ```python
+  def compute_fallback_confidence(
+      anomaly_scores: dict,
+      spot_scores: dict,
+      data_quality: dict
+  ) -> float:
+      """
+      計算 Fallback 結果的置信度
+      
+      Returns:
+          confidence: 0-1，越高表示越可靠
+      """
+      confidence_factors = []
+      
+      # 1. 異常分數分佈的區分度
+      scores = list(anomaly_scores.values())
+      if len(scores) > 1:
+          # 使用變異係數衡量區分度
+          cv = np.std(scores) / (np.mean(scores) + 1e-10)
+          distinction = min(1.0, cv / 2.0)  # 變異係數越大，區分度越高
+          confidence_factors.append(distinction)
+      
+      # 2. SPOT 分數的一致性
+      if spot_scores:
+          # 如果 Fallback 和 SPOT 的 Top-5 有重疊，置信度更高
+          top5_anomaly = sorted(anomaly_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+          top5_spot = sorted(spot_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+          overlap = len(set([n for n, _ in top5_anomaly]) & set([n for n, _ in top5_spot]))
+          consistency = overlap / 5.0
+          confidence_factors.append(consistency)
+      
+      # 3. 數據質量
+      if data_quality:
+          # 數據完整性、常數列比例等
+          data_conf = 1.0 - data_quality.get('removed_constant_rate', 0.0)
+          confidence_factors.append(data_conf)
+      
+      # 綜合置信度
+      if confidence_factors:
+          return np.mean(confidence_factors)
+      else:
+          return 0.5  # 預設中等置信度
+  ```
+- **目標**: 為 Fallback 結果提供可信度指標
+- **驗證**: 檢查置信度與實際準確率的相關性
+- **Risks**: 置信度計算可能不準確
+- **是否完成**: O
 
+#### Step 85: 添加 Fallback 相關配置
+- **任務**: 在配置中添加 Fallback 相關參數
+- **檔案**: `pcmci_shapley_modules/config.py`
+- **依賴**: Steps 81-84
+- **內容**:
+  ```python
+  @dataclass
+  class PCMCIShapleyConfig:
+      # ... 現有參數 ...
+      
+      # Fallback 優化參數（新增）
+      fallback_on_sparse_graph: bool = True  # 圖稀疏時是否觸發 Fallback
+      fallback_sparse_threshold: float = 0.5  # 邊數/節點數 < 此值視為稀疏
+      
+      # 混合模式參數（新增）
+      enable_hybrid_mode: bool = True
+      hybrid_confidence_threshold: float = 0.7  # > 此值用 PCMCI，< 1-此值用 Fallback
+      
+      # 增強異常分數參數（新增）
+      enhanced_anomaly_weights: tuple = (0.4, 0.3, 0.2, 0.1)  # (即時, 持續, 嚴重, 變化)
+  ```
+- **目標**: 可配置 Fallback 行為
+- **驗證**: 參數驗證通過
+- **Risks**: 參數過多
+- **是否完成**: O
+
+---
+
+### 子階段 K5: 端到端集成與測試 (Steps 86-90) ✅
+
+#### Step 86: 更新主流程邏輯
+- **任務**: 整合所有新功能到主流程
+- **檔案**: `RCAEval/e2e/pcmci_shapley.py`
+- **依賴**: Steps 69, 77, 81-85
+- **內容**: 完整重構主流程，整合：
+  - 數據驗證與清理
+  - SPOT 極值理論
+  - 聯合篩選器
+  - 多策略 PCMCI
+  - 智能 Fallback 觸發
+  - 混合模式排序
+- **目標**: 流程清晰，邏輯正確
+- **驗證**: 端到端測試通過
+- **Risks**: 集成可能引入新 bug
+- **是否完成**: X
+
+#### Step 87: 實作全面的日誌記錄
+- **任務**: 增強日誌記錄，便於調試和分析
+- **檔案**: 所有相關模組
+- **依賴**: Step 86
+- **內容**:
+  - 記錄每個階段的輸入輸出尺寸
+  - 記錄 PCMCI 策略使用情況
+  - 記錄篩選前後的節點數
+  - 記錄 Fallback 觸發原因
+  - 記錄置信度評估結果
+- **目標**: 日誌完整詳細，易於分析
+- **驗證**: 檢查日誌格式和內容
+- **Risks**: 過多日誌影響性能
+- **是否完成**: X
+
+#### Step 88: 創建完整測試套件
+- **任務**: 建立全面的測試
+- **檔案**: `tests/test_pcmci_shapley_integrated.py`
+- **依賴**: Step 86
+- **內容**:
+  - 單元測試：每個新增函數
+  - 集成測試：完整流程
+  - 回歸測試：確保原有功能不破壞
+  - 性能測試：執行時間和內存使用
+  - 邊緣測試：各種異常情況
+- **目標**: 測試覆蓋率 > 85%
+- **驗證**: pytest 全部通過
+- **Risks**: 測試編寫耗時
+- **是否完成**: X
+
+#### Step 89: 批量驗證與性能測試
+- **任務**: 在所有 RCAEval 數據集上驗證
+- **檔案**: `experiments/validate_enhanced_pcmci_shapley.py`
+- **依賴**: Steps 86-88
+- **內容**:
+  1. 運行所有數據集
+  2. 記錄關鍵指標：
+     - PCMCI 成功率（各策略分佈）
+     - Fallback 觸發率
+     - 聯合篩選器 Recall
+     - Avg@K 準確度指標
+     - 執行時間
+  3. 與原版本對比
+  4. 生成詳細報告
+- **目標**:
+  - PCMCI 失敗率 < 20%
+  - Fallback 觸發率 < 30%
+  - 整體 Avg@5 準確度 > 0.85
+  - 平均執行時間 < 2 分鐘
+- **驗證**: 達到目標指標
+- **Risks**: 某些數據集可能仍有問題
+- **是否完成**: X
+
+#### Step 90: 撰寫完整文檔 ✅
+- **任務**: 更新所有文檔
+- **檔案**: `docs/PCMCI_SHAPLEY_TECHNICAL_DOCUMENTATION.md`, `docs/PCMCI_SHAPLEY_USER_GUIDE.md`, `docs/CONFIGURATION_GUIDE.md`, `docs/API_REFERENCE.md`
+- **依賴**: Step 89
+- **內容**:
+  - 技術文檔：系統架構、核心組件、技術特性 ✅
+  - 用戶指南：快速開始、數據格式、配置選項、結果解讀 ✅
+  - 配置指南：參數分類、預設模板、調優指南、故障排除 ✅
+  - API 參考：核心 API、配置 API、預處理 API、工具函數 ✅
+- **目標**: 文檔完整清晰
+- **驗證**: 新用戶能根據文檔使用
+- **Risks**: 文檔與代碼不同步
+- **是否完成**: O
+
+---
+
+### 子階段 K6: 高級優化與調優 (Steps 91-95)
+
+#### Step 91: 實作超參數自動調優
+- **任務**: 基於網格搜索或貝葉斯優化自動調參
+- **檔案**: `pcmci_shapley_modules/auto_tuning.py` (新文件)
+- **依賴**: Step 89
+- **內容**:
+  - 定義參數搜索空間
+  - 實現網格搜索
+  - 實現貝葉斯優化（可選）
+  - 交叉驗證
+  - 輸出最佳參數組合
+- **目標**: 自動找到最佳參數
+- **驗證**: 在驗證集上性能提升
+- **Risks**: 計算成本高
+- **是否完成**: X
+
+#### Step 92: 實作數據集特徵提取器
+- **任務**: 自動分析數據集特徵並推薦參數
+- **檔案**: `pcmci_shapley_modules/dataset_profiler.py` (新文件)
+- **依賴**: Step 91
+- **內容**:
+  ```python
+  def profile_dataset(data: pd.DataFrame) -> dict:
+      """
+      分析數據集特徵
+      
+      Returns:
+          profile: {
+              'num_nodes': int,
+              'time_series_length': int,
+              'sampling_rate': float,
+              'stationarity': float,
+              'correlation_density': float,
+              'anomaly_density': float,
+              'system_type': str  # 'microservice', 'monolith', etc.
+          }
+      """
+      # 實現特徵提取邏輯
+      pass
+  
+  def recommend_config(profile: dict) -> PCMCIShapleyConfig:
+      """
+      基於數據集特徵推薦配置
+      """
+      config = PCMCIShapleyConfig()
+      
+      # 根據節點數調整
+      if profile['num_nodes'] > 30:
+          config.joint_top_n = 20
+          config.u_max = 25
+      
+      # 根據採樣率調整
+      if profile['sampling_rate'] < 10:  # 高頻
+          config.tau_max = 7
+      elif profile['sampling_rate'] > 60:  # 低頻
+          config.tau_max = 3
+      
+      # 根據系統類型調整
+      if profile['system_type'] == 'microservice':
+          config.theta1 = 0.6  # 更依賴 trace
+      
+      return config
+  ```
+- **目標**: 自動推薦適合的參數
+- **驗證**: 推薦配置優於預設
+- **Risks**: 特徵提取可能不準確
+- **是否完成**: X
+
+#### Step 93: 實作在線學習與適應
+- **任務**: 允許方法從歷史結果中學習
+- **檔案**: `pcmci_shapley_modules/online_learning.py` (新文件)
+- **依賴**: Step 92
+- **內容**:
+  - 記錄每次運行的結果
+  - 記錄哪些參數組合效果好
+  - 更新參數推薦模型
+  - 持久化學習結果
+- **目標**: 方法隨使用越來越智能
+- **驗證**: 長期使用後性能提升
+- **Risks**: 需要標註數據（根因標籤）
+- **是否完成**: X
+
+#### Step 94: 實作診斷和可視化工具
+- **任務**: 提供豐富的診斷和可視化
+- **檔案**: `pcmci_shapley_modules/diagnostics.py` (新文件)
+- **依賴**: Step 86
+- **內容**:
+  - 生成 HTML 診斷報告
+  - 可視化因果圖
+  - 可視化 Shapley 值分佈
+  - 可視化篩選過程
+  - 可視化傳播過程
+  - 對比 PCMCI 和 Fallback 結果
+- **目標**: 幫助理解方法行為
+- **驗證**: 生成可讀的報告
+- **Risks**: 可視化工具複雜
+- **是否完成**: X
+
+#### Step 95: 最終驗收與文檔發布
+- **任務**: 完成所有驗收標準
+- **檔案**: 所有文檔
+- **依賴**: Steps 86-94
+- **內容**:
+  1. 檢查所有 Steps 完成情況
+  2. 運行完整測試套件
+  3. 在所有數據集上驗證
+  4. 生成最終性能報告
+  5. 更新所有文檔
+  6. 準備演示和教程
+- **目標**: 達到所有驗收標準
+- **驗收標準**:
+  - 所有 Steps 66-95 完成
+  - 測試覆蓋率 > 85%
+  - PCMCI 成功率 > 80%
+  - Fallback 觸發率 < 30%
+  - 整體 Avg@5 > 0.85
+  - 平均執行時間 < 2 分鐘
+  - 文檔完整
+- **Risks**: 時間壓力
+- **是否完成**: X
+
+---
+
+## 實作優先順序（階段 K）
+
+### 第一輪（核心穩定性）- 優先級最高
+- Steps 66-70: PCMCI 穩定性增強
+- Steps 71-75: SPOT 極值理論集成
+- Steps 76-80: 聯合篩選器實現
+
+### 第二輪（智能 Fallback）- 優先級高
+- Steps 81-85: Fallback 機制優化
+- Steps 86-90: 端到端集成與測試
+
+### 第三輪（高級功能）- 優先級中
+- Steps 91-93: 自動調優與在線學習
+- Steps 94-95: 診斷工具與最終驗收
+
+---
+
+## 預期成果
+
+完成階段 K 後，PCMCI-Shapley 方法將具備：
+
+1. **高穩定性**：PCMCI 失敗率 < 20%
+2. **高準確性**：Avg@5 > 0.85
+3. **高魯棒性**：在各種數據質量下都能工作
+4. **高智能度**：自動調參和推薦
+5. **高可解釋性**：豐富的診斷和可視化 

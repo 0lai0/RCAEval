@@ -3,6 +3,7 @@ import pandas as pd
 import networkx as nx
 from typing import Any, Dict
 import logging
+import time
 
 from RCAEval.e2e import rca
 from RCAEval.io.time_series import preprocess
@@ -43,6 +44,9 @@ def pcmci_shapley(
         logger.setLevel(logging.INFO)
         logger.propagate = False  # 防止重複輸出
     logger.info("Starting pcmci_shapley pipeline")
+    start_time = time.time()
+    timings = {}
+    
     cfg = config or PCMCIShapleyConfig()
     cfg.validate()
     logger.debug({
@@ -54,40 +58,96 @@ def pcmci_shapley(
     })
 
     # 1) Base preprocessing from framework
+    t1 = time.time()
     base_df = preprocess(data=data, dataset=dataset, dk_select_useful=dk_select_useful)
     logger.info(f"Base preprocess done: shape={base_df.shape}")
+    timings['base_preprocessing'] = time.time() - t1
 
     # 2) Our method-specific preprocessing
-    pp = prep_mod.preprocess_data(base_df, cfg)
-    logger.info("Method-specific preprocessing complete")
+    t2 = time.time()
+    try:
+        pp = prep_mod.preprocess_data(base_df, cfg)
+        logger.info("Method-specific preprocessing complete")
+        logger.info(f"Preprocessing output keys: {list(pp.keys())}")
+        logger.info(f"Node anomaly shape: {pp.get('node_anomaly', pd.Series()).shape}")
+        logger.info(f"Node spot shape: {pp.get('node_spot', pd.Series()).shape}")
+    except Exception as e:
+        logger.error(f"Preprocessing failed: {e}")
+        raise
+    timings['method_preprocessing'] = time.time() - t2
 
-    # 2.5) Pruning: Reduce candidate nodes before expensive operations
-    if cfg.enable_pruning:
-        from .pcmci_shapley_modules import pruning as prune_mod
-        
-        # 獲取所有候選節點 (從 metric_mapping 提取服務名)
-        all_candidates = list(pp.get("metric_mapping", {}).keys())
-        
-        # 應用組合剪枝
-        pruned_nodes = prune_mod.combined_pruning(
-            all_nodes=all_candidates,
-            node_anomaly=pp.get("node_anomaly", {}),
-            trace_graph=trace_graph,
-            focus_node=focus_node or all_candidates[0] if all_candidates else "unknown",
-            max_hops=cfg.pruning_max_hops,
-            anomaly_percentile=cfg.pruning_anomaly_percentile,
-            min_nodes=cfg.pruning_min_nodes
-        )
-        
-        logger.info(f"Pruning: {len(all_candidates)} -> {len(pruned_nodes)} nodes")
-        
-        # 更新 node_anomaly_ts 只保留剪枝後的節點
-        node_anomaly_ts_original = pp.get("node_anomaly_ts", {})
-        node_anomaly_ts = {k: v for k, v in node_anomaly_ts_original.items() 
-                           if k in pruned_nodes}
-    else:
-        node_anomaly_ts = pp.get("node_anomaly_ts", {})
-        logger.info("Pruning disabled")
+    # 2.5) Joint Screener: Advanced node selection using Fallback + SPOT
+    t3 = time.time()
+    if cfg.joint_screener_enabled:
+        try:
+            from .pcmci_shapley_modules import joint_screener as js_mod
+            
+            # 獲取所有候選節點
+            all_candidates = list(pp.get("metric_mapping", {}).keys())
+            logger.info(f"Joint screener input: {len(all_candidates)} candidate nodes")
+            
+            # 獲取異常分數和 SPOT 分數
+            node_anomaly_series = pp.get("node_anomaly", pd.Series())
+            node_spot_series = pp.get("node_spot", pd.Series())
+            
+            logger.info(f"Anomaly series length: {len(node_anomaly_series)}, Spot series length: {len(node_spot_series)}")
+            
+            # 驗證輸入
+            is_valid, error_msg = js_mod.validate_screening_inputs(node_anomaly_series, node_spot_series)
+            if not is_valid:
+                logger.warning(f"Joint screener validation failed: {error_msg}, falling back to pruning")
+                cfg.joint_screener_enabled = False
+            else:
+                # 執行聯合篩選
+                screened_nodes, fusion_scores = js_mod.joint_screening(
+                    node_anomaly_series, 
+                    node_spot_series, 
+                    cfg
+                )
+                
+                logger.info(f"Joint screening: {len(all_candidates)} -> {len(screened_nodes)} nodes")
+                logger.info(f"Top-5 fusion scores: {dict(list(fusion_scores.items())[:5])}")
+                
+                # 更新 node_anomaly_ts 只保留篩選後的節點
+                node_anomaly_ts_original = pp.get("node_anomaly_ts", {})
+                node_anomaly_ts = {k: v for k, v in node_anomaly_ts_original.items() 
+                                   if k in screened_nodes}
+                
+                # 記錄融合分數供後續使用
+                kwargs['fusion_scores'] = fusion_scores
+        except Exception as e:
+            logger.error(f"Joint screener failed: {e}, falling back to pruning")
+            cfg.joint_screener_enabled = False
+    
+    # 2.6) Fallback to pruning if joint screener disabled or failed
+    if not cfg.joint_screener_enabled:
+        if cfg.enable_pruning:
+            from .pcmci_shapley_modules import pruning as prune_mod
+            
+            # 獲取所有候選節點 (從 metric_mapping 提取服務名)
+            all_candidates = list(pp.get("metric_mapping", {}).keys())
+            
+            # 應用組合剪枝
+            pruned_nodes = prune_mod.combined_pruning(
+                all_nodes=all_candidates,
+                node_anomaly=pp.get("node_anomaly", {}),
+                trace_graph=trace_graph,
+                focus_node=focus_node or all_candidates[0] if all_candidates else "unknown",
+                max_hops=cfg.pruning_max_hops,
+                anomaly_percentile=cfg.pruning_anomaly_percentile,
+                min_nodes=cfg.pruning_min_nodes
+            )
+            
+            logger.info(f"Pruning: {len(all_candidates)} -> {len(pruned_nodes)} nodes")
+            
+            # 更新 node_anomaly_ts 只保留剪枝後的節點
+            node_anomaly_ts_original = pp.get("node_anomaly_ts", {})
+            node_anomaly_ts = {k: v for k, v in node_anomaly_ts_original.items() 
+                               if k in pruned_nodes}
+        else:
+            node_anomaly_ts = pp.get("node_anomaly_ts", {})
+            logger.info("Both joint screener and pruning disabled")
+    timings['joint_screening'] = time.time() - t3
 
     # 3) Determine focus node: prefer provided focus or SLI's service, else max anomaly
     if focus_node is None:
@@ -105,6 +165,7 @@ def pcmci_shapley(
                        for k, v in node_anomaly_ts.items()}
 
     # 5) Local node construction
+    t4 = time.time()
     n_jobs = cfg.node_isolation_n_jobs if cfg.enable_parallel else 1
     U0 = iso_mod.statistical_neighborhood(focus_node, node_anomaly_ts, cfg.tau_max, cfg.top_m1, n_jobs=n_jobs)
     feats = iso_mod.build_isolation_features(U0, focus_node, node_anomaly_ts, cfg.tau_max)
@@ -113,26 +174,58 @@ def pcmci_shapley(
     if focus_node not in U:
         U = [focus_node] + [n for n in U if n != focus_node]
     logger.info(f"Local set size: |U0|={len(U0)} |U1|={len(U1)} |U|={len(U)}")
+    timings['node_isolation'] = time.time() - t4
 
-    # 6) PCMCI local causal test (use per-service anomaly series to keep variable count = |U|)
+    # 6) PCMCI local causal test with adaptive strategy
+    t5 = time.time()
     service_df = pd.DataFrame({s: node_anomaly_ts.get(s, pd.Series(dtype=float)).values for s in U})
-    # 清理 NaN 值
-    service_df = service_df.fillna(0)
-    # 移除常數列（標準差為0）
-    service_df = service_df.loc[:, service_df.std() > 0]
-    
+
+    # 时间窗口截断（如果启用）
+    if cfg.enable_window_truncation and cfg.window_length:
+        if len(service_df) > cfg.window_length:
+            service_df = service_df.tail(cfg.window_length)
+            logger.info(f"Truncated time window to {cfg.window_length} timesteps")
+
     logger.info(f"PCMCI input shape: {service_df.shape}")
-    
+    logger.info(f"PCMCI input columns: {list(service_df.columns)}")
+    logger.info(f"PCMCI input data range: min={service_df.min().min():.4f}, max={service_df.max().max():.4f}")
+
+    # 使用自适应策略执行器
     try:
-        pcmci_res = pcmci_mod.local_pcmci_causal_test(service_df, list(service_df.columns), cfg)
+        pcmci_res = pcmci_mod.run_adaptive_pcmci(
+            service_df,
+            list(service_df.columns),
+            cfg,
+            focus_node=focus_node,
+            trace_graph=trace_graph,
+            anomaly_scores=pp.get("node_anomaly", None)
+        )
+        
+        logger.info(f"PCMCI completed with strategy: {pcmci_res.get('strategy_used', 'unknown')}")
         logger.info(f"PCMCI edges (var-level): {len(pcmci_res['edges'])}")
+        
+        # 记录优化统计
+        if 'n_chunks' in pcmci_res:
+            logger.info(f"Chunking stats: {pcmci_res['n_chunks']} chunks, {pcmci_res['successful_chunks']} successful")
+        if 'phase1_iterations' in pcmci_res:
+            logger.info(f"Multi-phase stats: {pcmci_res['initial_nodes']} -> {pcmci_res['final_nodes']} nodes in {pcmci_res['phase1_iterations']} iterations")
+        
+        # 记录诊断信息
+        if 'diagnostics' in pcmci_res:
+            diagnostics = pcmci_res['diagnostics']
+            logger.info(f"Data validation: {diagnostics}")
+            
     except Exception as e:
-        logger.warning(f"PCMCI failed: {e}. Using empty causal graph.")
+        logger.error(f"PCMCI execution failed completely: {e}")
+        # 创建空的 PCMCI 结果
         pcmci_res = {
             'edges': [],
             'edge_strengths': {},
-            'columns': list(service_df.columns)
+            'columns': list(service_df.columns),
+            'strategy_used': 'failed',
+            'diagnostics': {'error': str(e)}
         }
+    timings['pcmci'] = time.time() - t5
 
     # Map variable-level indices back to service names (combine by prefix)
     # Create a service graph and strengths aggregated by (service_i, service_j)
@@ -164,9 +257,11 @@ def pcmci_shapley(
     logger.info("Propagation completed")
 
     # 9) Shapley values
+    t6 = time.time()
     shapley = shap_mod.compute_shapley_values(U, norm_w, delta, cfg)
     shapley_norm = shap_mod.normalize_shapley(shapley)
     logger.info("Shapley values computed")
+    timings['shapley'] = time.time() - t6
 
     # 10) Scoring & ranking
     # Reachability using normalized weights graph
@@ -236,27 +331,68 @@ def pcmci_shapley(
     
     logger.info(f"Initial metric_ranks sample: {metric_ranks[:5] if metric_ranks else 'Empty'}")
     
-    # Fallback if metric choices are empty OR graph is too sparse: sort by last anomaly scores
-    total_weight = float(sum(norm_w.values())) if norm_w else 0.0
-    logger.info(f"Total weight: {total_weight:.6f}, norm_w edges: {len(norm_w)}")
+    # Enhanced Fallback mechanism with intelligent triggering
+    from .pcmci_shapley_modules import fallback_optimizer as fb_opt
     
-    fallback_triggered = False
-    if (not metric_ranks or all((mr is None for mr in metric_ranks))) or total_weight == 0.0:
-        fallback_triggered = True
-        logger.warning(f"FALLBACK TRIGGERED! Reason: metric_ranks_empty={not metric_ranks}, all_none={all((mr is None for mr in metric_ranks)) if metric_ranks else False}, total_weight_zero={total_weight == 0.0}")
+    # Determine if Fallback should be triggered
+    should_fallback, fallback_reason = fb_opt.should_trigger_fallback(
+        pcmci_res, norm_w, metric_ranks, cfg
+    )
+    
+    # Compute PCMCI confidence
+    num_nodes = len(set([i for i, j in norm_w.keys()] + [j for i, j in norm_w.keys()])) if norm_w else 0
+    pcmci_confidence = fb_opt.compute_pcmci_confidence(pcmci_res, norm_w, num_nodes)
+    
+    logger.info(f"PCMCI confidence: {pcmci_confidence:.3f}")
+    logger.info(f"Should trigger fallback: {should_fallback}, reason: {fallback_reason}")
+    
+    if should_fallback:
+        # Compute Fallback confidence
+        node_anomaly_dict = {k: float(v) for k, v in pp.get("node_anomaly", {}).items()}
+        node_spot_dict = {k: float(v) for k, v in pp.get("node_spot", {}).items()}
+        fallback_confidence = fb_opt.compute_fallback_confidence(
+            node_anomaly_dict, node_spot_dict
+        )
+        
+        logger.info(f"Fallback confidence: {fallback_confidence:.3f}")
+        
+        # Generate Fallback ranking
         try:
+            fallback_metric_ranks = fb_opt.intelligent_fallback_ranking(
+                pp.get("anomaly_scores", pd.DataFrame()),
+                pp.get("node_anomaly_ts", {}),
+                cfg,
+                focus_node
+            )
+            logger.info(f"Fallback metric_ranks sample: {fallback_metric_ranks[:5]}")
+        except Exception as e:
+            logger.error(f"Enhanced fallback failed: {e}, using simple fallback")
+            # Simple fallback
             anom = pp.get("anomaly_scores")
             if isinstance(anom, pd.DataFrame):
                 scores_row = anom[[c for c in anom.columns if c != "time"]].iloc[-1]
-                metric_ranks = scores_row.sort_values(ascending=False).index.tolist()
-                logger.info(f"Fallback metric_ranks sample: {metric_ranks[:5]}")
+                fallback_metric_ranks = scores_row.sort_values(ascending=False).index.tolist()
             else:
-                logger.warning("anomaly_scores is not DataFrame, fallback failed")
-        except Exception as e:
-            logger.error(f"Fallback exception: {e}")
+                fallback_metric_ranks = []
+        
+        # Apply hybrid mode if enabled
+        if cfg.enable_hybrid_mode and metric_ranks:
+            logger.info("Applying hybrid ranking mode")
+            metric_ranks = fb_opt.hybrid_ranking(
+                metric_ranks, fallback_metric_ranks, pcmci_confidence, cfg
+            )
+        else:
+            metric_ranks = fallback_metric_ranks
     
     logger.info(f"Final metric-level Top-5: {metric_ranks[:5] if metric_ranks else metric_ranks}")
-    logger.info(f"Fallback triggered: {fallback_triggered}")
+    logger.info(f"Fallback triggered: {should_fallback}")
+
+    # 计算总时间并记录性能统计
+    total_time = time.time() - start_time
+    timings['total'] = total_time
+    
+    logger.info(f"Pipeline timings: {timings}")
+    logger.info(f"Total time: {total_time:.2f}s")
 
     result = {
         "adj": adj,
@@ -265,6 +401,7 @@ def pcmci_shapley(
         "scores": scores,
         "shapley_values": shapley,
         "local_graph": G,
+        "timings": timings,  # 添加性能统计
     }
     logger.info("pcmci_shapley pipeline completed")
     return result

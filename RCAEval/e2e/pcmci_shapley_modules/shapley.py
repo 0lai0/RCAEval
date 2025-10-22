@@ -95,13 +95,14 @@ def compute_shapley_values(local_nodes: List[str], edge_weights: Dict[Tuple[str,
 
     if cfg.shapley_method == "exact" and len(local_nodes) <= 15:
         # Fallback to sampling with high R if exact not implemented yet
-        R = max(cfg.sampling_rounds, 2000)
+        R = max(cfg.sampling_rounds, 3000)  # 提升到3000輪
         return compute_shapley_sampling(local_nodes, v, R=R, n_jobs=cfg.shapley_n_jobs)
     elif cfg.shapley_method == "adaptive":
         # Adaptive sampling
         return compute_adaptive_shapley_sampling(local_nodes, v, cfg)
-    # default sampling
-    return compute_shapley_sampling(local_nodes, v, R=cfg.sampling_rounds, n_jobs=cfg.shapley_n_jobs)
+    # default sampling - 大幅提升採樣輪數
+    R = max(cfg.sampling_rounds, 2000)  # 至少2000輪
+    return compute_shapley_sampling(local_nodes, v, R=R, n_jobs=cfg.shapley_n_jobs)
 
 
 def compute_adaptive_shapley_sampling(
