@@ -9,7 +9,8 @@ class PCMCIShapleyConfig:
     top_m2: int = 30
     u_max: int = 40
 
-    # PCMCI
+    # Causal Discovery
+    causal_method: str = "pc"  # pcmci, pc, ges, fci, lingam
     pcmci_alpha: float = 0.05
     use_pca: bool = False
     pca_components: int = 10
@@ -43,6 +44,7 @@ class PCMCIShapleyConfig:
     pruning_max_hops: int = 2
     pruning_anomaly_percentile: float = 0.3
     pruning_min_nodes: int = 10
+    pruning_max_nodes: int = 20  # 剪枝後最多保留的節點數
 
     # PCMCI 優化 (新增)
     pcmci_max_conds_dim: int | None = 3  # None 表示不限制
@@ -62,6 +64,7 @@ class PCMCIShapleyConfig:
     adaptive_check_interval: int = 50  # 每 50 輪檢查一次
 
     def validate(self) -> bool:
+        assert self.causal_method in ["pcmci", "pc", "ges", "fci", "lingam"]
         assert 0 < self.tau_max <= 10
         assert 0 < self.pcmci_alpha < 1
         assert abs(self.theta1 + self.theta2 + self.theta3 - 1.0) < 1e-9
@@ -70,6 +73,7 @@ class PCMCIShapleyConfig:
         assert 0 <= self.lambda_penalty
         assert self.score_alpha1 >= 0 and self.score_alpha2 >= 0 and self.score_alpha3 >= 0
         assert abs(self.score_alpha1 + self.score_alpha2 + self.score_alpha3 - 1.0) < 1e-9
+        assert self.pruning_max_nodes >= self.pruning_min_nodes
         
         # Phase 2 驗證
         assert self.node_isolation_n_jobs >= -1

@@ -92,7 +92,7 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
     
     # 創建 DataFrame 並運行 PCMCI
     dataframe = data_processing.DataFrame(X_clean)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=_ParCorr(significance="analytic"), verbosity=0)
+    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
     
     # 動態調整 max_conds_dim
     if max_conds_dim is None:

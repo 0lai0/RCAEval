@@ -3,6 +3,8 @@ import pandas as pd
 import networkx as nx
 from typing import Any, Dict
 import logging
+import os
+import time
 
 from RCAEval.e2e import rca
 from RCAEval.io.time_series import preprocess
@@ -12,6 +14,7 @@ from .pcmci_shapley_modules import (
     preprocessing as prep_mod,
     node_isolation as iso_mod,
     pcmci_local as pcmci_mod,
+    causal_discovery as causal_mod,
     edge_fusion as fuse_mod,
     propagation as prop_mod,
     shapley as shap_mod,
@@ -53,13 +56,31 @@ def pcmci_shapley(
         "alpha_prop": cfg.alpha_prop,
     })
 
+    # Optional overrides via environment for quick tuning
+    try:
+        env_method = os.environ.get("CAUSAL_METHOD")
+        if env_method in {"pcmci", "pc"}:
+            cfg.causal_method = env_method
+        if os.environ.get("FAST_MODE", "0") in {"1", "true", "True"}:
+            cfg.causal_method = "pc"
+            cfg.pcmci_max_conds_dim = 2
+            cfg.tau_max = min(cfg.tau_max, 3)
+            cfg.pruning_max_nodes = min(cfg.pruning_max_nodes, 15)
+            cfg.enable_pruning = True
+        logger.info(f"Effective causal_method={cfg.causal_method}, tau_max={cfg.tau_max}, max_conds_dim={cfg.pcmci_max_conds_dim}, pruning_max_nodes={cfg.pruning_max_nodes}")
+    except Exception:
+        pass
+
+    t0 = time.time()
     # 1) Base preprocessing from framework
     base_df = preprocess(data=data, dataset=dataset, dk_select_useful=dk_select_useful)
     logger.info(f"Base preprocess done: shape={base_df.shape}")
+    t1 = time.time(); logger.info(f"TIMER base_preprocess: {(t1 - t0):.3f}s")
 
     # 2) Our method-specific preprocessing
     pp = prep_mod.preprocess_data(base_df, cfg)
     logger.info("Method-specific preprocessing complete")
+    t2 = time.time(); logger.info(f"TIMER method_preprocess: {(t2 - t1):.3f}s")
 
     # 2.5) Pruning: Reduce candidate nodes before expensive operations
     if cfg.enable_pruning:
@@ -76,7 +97,8 @@ def pcmci_shapley(
             focus_node=focus_node or all_candidates[0] if all_candidates else "unknown",
             max_hops=cfg.pruning_max_hops,
             anomaly_percentile=cfg.pruning_anomaly_percentile,
-            min_nodes=cfg.pruning_min_nodes
+            min_nodes=cfg.pruning_min_nodes,
+            max_nodes=cfg.pruning_max_nodes
         )
         
         logger.info(f"Pruning: {len(all_candidates)} -> {len(pruned_nodes)} nodes")
@@ -113,26 +135,58 @@ def pcmci_shapley(
     if focus_node not in U:
         U = [focus_node] + [n for n in U if n != focus_node]
     logger.info(f"Local set size: |U0|={len(U0)} |U1|={len(U1)} |U|={len(U)}")
+    t3 = time.time(); logger.info(f"TIMER node_isolation: {(t3 - t2):.3f}s")
 
-    # 6) PCMCI local causal test (use per-service anomaly series to keep variable count = |U|)
-    service_df = pd.DataFrame({s: node_anomaly_ts.get(s, pd.Series(dtype=float)).values for s in U})
+    # 6) Causal discovery using unified interface
+    # 確保所有序列長度一致，缺失者以 0 補齊
+    try:
+        # 推斷時間長度：優先使用已有節點的長度，否則用 base_df 的行數
+        existing_series = [v for v in node_anomaly_ts.values() if isinstance(v, pd.Series) and len(v) > 0]
+        series_len = len(existing_series[0]) if existing_series else int(base_df.shape[0])
+    except Exception:
+        series_len = int(base_df.shape[0])
+
+    series_map: Dict[str, pd.Series] = {}
+    for s in U:
+        v = node_anomaly_ts.get(s)
+        if isinstance(v, pd.Series) and len(v) == series_len:
+            series_map[s] = v
+        elif isinstance(v, pd.Series) and len(v) > 0 and len(v) != series_len:
+            # 對齊長度：截斷或以 0 補齊
+            if len(v) > series_len:
+                series_map[s] = v.iloc[-series_len:]
+            else:
+                pad = pd.Series([0.0] * (series_len - len(v)))
+                series_map[s] = pd.concat([v, pad], ignore_index=True)
+        else:
+            # 缺失時以 0 序列填充
+            series_map[s] = pd.Series([0.0] * series_len, dtype=float)
+
+    service_df = pd.DataFrame({s: series_map[s].values for s in U})
     # 清理 NaN 值
     service_df = service_df.fillna(0)
     # 移除常數列（標準差為0）
     service_df = service_df.loc[:, service_df.std() > 0]
     
-    logger.info(f"PCMCI input shape: {service_df.shape}")
+    logger.info(f"Causal discovery input shape: {service_df.shape}, method: {cfg.causal_method}")
     
     try:
-        pcmci_res = pcmci_mod.local_pcmci_causal_test(service_df, list(service_df.columns), cfg)
-        logger.info(f"PCMCI edges (var-level): {len(pcmci_res['edges'])}")
+        # Use unified causal discovery interface
+        pcmci_res = causal_mod.discover_causal_graph(
+            service_df, 
+            list(service_df.columns), 
+            cfg,
+            method=cfg.causal_method
+        )
+        logger.info(f"Causal edges (var-level): {len(pcmci_res['edges'])}")
     except Exception as e:
-        logger.warning(f"PCMCI failed: {e}. Using empty causal graph.")
+        logger.warning(f"Causal discovery failed: {e}. Using empty causal graph.")
         pcmci_res = {
             'edges': [],
             'edge_strengths': {},
             'columns': list(service_df.columns)
         }
+    t4 = time.time(); logger.info(f"TIMER causal_discovery: {(t4 - t3):.3f}s")
 
     # Map variable-level indices back to service names (combine by prefix)
     # Create a service graph and strengths aggregated by (service_i, service_j)
@@ -155,6 +209,7 @@ def pcmci_shapley(
     fused = fuse_mod.apply_conflict_penalty(fused, pcmci_edges_svc, cfg.gamma)
     norm_w = fuse_mod.normalize_incoming_weights(fused, U)
     logger.info(f"Fused edges: raw={len(fused)} normalized={len(norm_w)} trace_edges={len(trace_w)}")
+    t5 = time.time(); logger.info(f"TIMER edge_fusion: {(t5 - t4):.3f}s")
 
     # 8) Propagation
     # initial anomaly at final timestamp
@@ -162,11 +217,13 @@ def pcmci_shapley(
     delta = prop_mod.compute_initial_anomaly(node_anomaly_last)
     prop = prop_mod.propagate_k_steps(delta, norm_w, cfg.K, cfg.alpha_prop)
     logger.info("Propagation completed")
+    t6 = time.time(); logger.info(f"TIMER propagation: {(t6 - t5):.3f}s")
 
     # 9) Shapley values
     shapley = shap_mod.compute_shapley_values(U, norm_w, delta, cfg)
     shapley_norm = shap_mod.normalize_shapley(shapley)
     logger.info("Shapley values computed")
+    t7 = time.time(); logger.info(f"TIMER shapley: {(t7 - t6):.3f}s")
 
     # 10) Scoring & ranking
     # Reachability using normalized weights graph
@@ -190,6 +247,7 @@ def pcmci_shapley(
     scores = score_mod.compute_comprehensive_score(shapley_norm, reach_norm, anomaly_norm, cfg)
     ranks = score_mod.compute_final_ranking(scores, penalties)
     logger.info(f"Service-level ranking ready. Top-5: {ranks[:5] if ranks else ranks}")
+    t8 = time.time(); logger.info(f"TIMER scoring: {(t8 - t7):.3f}s, TOTAL: {(t8 - t0):.3f}s")
     
     # 加入詳細的評分日誌
     logger.info(f"Scores sample: {dict(list(scores.items())[:5])}")
@@ -260,7 +318,8 @@ def pcmci_shapley(
 
     result = {
         "adj": adj,
-        "node_names": base_cols,
+        # Return the actual local set order used to build adj
+        "node_names": node_names,
         "ranks": metric_ranks,
         "scores": scores,
         "shapley_values": shapley,

@@ -21,6 +21,8 @@ def fuse_edge_weights(trace_w: Dict[Tuple[str, str], float], pcmci_strengths: Di
     fused: Dict[Tuple[str, str], float] = {}
     nodes = set([i for i, _ in trace_w.keys()] + [j for _, j in trace_w.keys()])
     nodes |= set([i for i, _ in pcmci_strengths.keys()] + [j for _, j in pcmci_strengths.keys()])
+    # Ensure isolation-selected nodes are included even if there are no trace/PCMCI edges
+    nodes |= set(isolation_scores.keys())
     for i in nodes:
         for j in nodes:
             if i == j:

@@ -55,7 +55,8 @@ def trace_based_prefiltering(
 def early_anomaly_pruning(
     node_anomaly: Dict[str, float] | pd.Series,
     threshold_percentile: float = 0.3,
-    min_nodes: int = 10
+    min_nodes: int = 10,
+    max_nodes: int = 50
 ) -> List[str]:
     """
     早期異常分數剪枝：只保留異常分數較高的節點
@@ -64,6 +65,7 @@ def early_anomaly_pruning(
         node_anomaly: 各節點的異常分數 (字典或 Series)
         threshold_percentile: 保留的百分位數 (0.3 表示保留 top 70%)
         min_nodes: 最少保留的節點數
+        max_nodes: 最多保留的節點數
     
     Returns:
         過濾後的節點列表
@@ -93,6 +95,13 @@ def early_anomaly_pruning(
         sorted_nodes = sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
         filtered = [n for n, _ in sorted_nodes[:min_nodes]]
     
+    # 確保不超過 max_nodes 個節點
+    if len(filtered) > max_nodes:
+        # 按異常分數排序，保留前 max_nodes 個
+        filtered_scores = {n: valid_scores[n] for n in filtered}
+        sorted_filtered = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)
+        filtered = [n for n, _ in sorted_filtered[:max_nodes]]
+    
     return filtered
 
 
@@ -103,7 +112,8 @@ def combined_pruning(
     focus_node: str,
     max_hops: int = 2,
     anomaly_percentile: float = 0.3,
-    min_nodes: int = 10
+    min_nodes: int = 10,
+    max_nodes: int = 50
 ) -> List[str]:
     """
     組合剪枝策略：先 trace 過濾，再異常分數過濾
@@ -122,7 +132,7 @@ def combined_pruning(
     
     # 只考慮 step1 中的節點
     step1_anomaly = {k: v for k, v in node_anomaly_dict.items() if k in step1}
-    step2 = early_anomaly_pruning(step1_anomaly, anomaly_percentile, min_nodes)
+    step2 = early_anomaly_pruning(step1_anomaly, anomaly_percentile, min_nodes, max_nodes)
     
     # 確保 focus_node 一定保留
     if focus_node not in step2 and focus_node in all_nodes:
