@@ -63,6 +63,10 @@ class PCMCIShapleyConfig:
     adaptive_tolerance: float = 0.01  # 1% 相對誤差
     adaptive_check_interval: int = 50  # 每 50 輪檢查一次
 
+    # Phase 2: Shapley 緩存優化 (新增)
+    enable_shapley_cache: bool = True  # 是否啟用 coalition value 緩存
+    shapley_cache_size: int = 2048  # 每個進程的緩存大小（LRU cache 最大條目數）
+
     def validate(self) -> bool:
         assert self.causal_method in ["pcmci", "pc", "ges", "fci", "lingam"]
         assert 0 < self.tau_max <= 10
@@ -83,5 +87,6 @@ class PCMCIShapleyConfig:
         assert self.adaptive_confidence in [0.95, 0.99]
         assert 0 < self.adaptive_tolerance < 1
         assert self.adaptive_check_interval >= 10
+        assert self.shapley_cache_size >= 64  # 緩存大小至少為 64
         
         return True
