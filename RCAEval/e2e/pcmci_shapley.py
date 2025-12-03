@@ -36,6 +36,14 @@ def pcmci_shapley(
 ) -> Dict[str, Any]:
     """PCMCI-Shapley end-to-end pipeline.
 
+    Implements the CPG-Shap method by:
+    (1) fusing deterministic trace-based topological constraints with
+        probabilistic causal discovery (PC / PCMCI) to build a weighted
+        causal propagation graph over services,
+    (2) simulating discrete-time anomaly propagation on this graph, and
+    (3) applying cooperative-game-theoretic Shapley attribution to obtain
+        fine-grained, causally-informed root cause rankings.
+
     Returns dict with keys: adj, node_names, ranks.
     """
     logger = logging.getLogger("pcmci_shapley")
