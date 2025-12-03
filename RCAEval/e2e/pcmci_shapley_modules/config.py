@@ -26,8 +26,14 @@ class PCMCIShapleyConfig:
     alpha_prop: float = 0.85
 
     # Shapley
-    shapley_method: str = "auto"  # auto, exact, sampling
+    shapley_method: str = "auto"  # auto, exact, sampling, adaptive
     sampling_rounds: int = 500
+
+    # Ablation / attribution variants
+    # 是否使用 trace 拓撲資訊（關閉後只使用統計因果圖）
+    use_trace: bool = True
+    # 歸因方法：shapley（預設）、pagerank、randomwalk
+    attribution_method: str = "shapley"
 
     # Scoring
     score_alpha1: float = 0.5

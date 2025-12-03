@@ -55,6 +55,36 @@ def pcmci_shapley(
         logger.propagate = False  # 防止重複輸出
     logger.info("Starting pcmci_shapley pipeline")
     cfg = config or PCMCIShapleyConfig()
+
+    # ---- Env overrides for quick experimentation (RQ2/RQ3) ----
+    # 1) Causal method override (already partially supported below)
+    # 2) Propagation decay factor alpha_prop
+    try:
+        alpha_env = os.environ.get("ALPHA_PROP")
+        if alpha_env is not None:
+            cfg.alpha_prop = float(alpha_env)
+    except Exception:
+        pass
+
+    # 3) Shapley sampling rounds
+    try:
+        rounds_env = os.environ.get("SHAPLEY_ROUNDS")
+        if rounds_env is not None:
+            cfg.sampling_rounds = int(rounds_env)
+    except Exception:
+        pass
+
+    # 4) Ablation toggles
+    try:
+        use_trace_env = os.environ.get("USE_TRACE")
+        if use_trace_env is not None:
+            cfg.use_trace = use_trace_env.lower() in {"1", "true", "yes"}
+        attrib_env = os.environ.get("ATTRIBUTION_METHOD")
+        if attrib_env is not None:
+            cfg.attribution_method = attrib_env
+    except Exception:
+        pass
+
     cfg.validate()
     logger.debug({
         "tau_max": cfg.tau_max,
@@ -139,7 +169,14 @@ def pcmci_shapley(
     U0 = iso_mod.statistical_neighborhood(focus_node, node_anomaly_ts, cfg.tau_max, cfg.top_m1, n_jobs=n_jobs)
     feats = iso_mod.build_isolation_features(U0, focus_node, node_anomaly_ts, cfg.tau_max)
     U1, I_scores = iso_mod.isolation_forest_selection(feats, cfg.top_m2)
-    U = iso_mod.trace_augmentation(U1, trace_graph, focus_node, cfg.u_max)
+
+    # trace-based augmentation can be disabled for ablation (w/o trace)
+    if cfg.use_trace:
+        U = iso_mod.trace_augmentation(U1, trace_graph, focus_node, cfg.u_max)
+        logger.info(f"Trace augmentation enabled, |U1|={len(U1)} -> |U|={len(U)}")
+    else:
+        U = list(U1)
+        logger.info(f"Trace augmentation DISABLED (use_trace=False), |U|={len(U)}")
     if focus_node not in U:
         U = [focus_node] + [n for n in U if n != focus_node]
     logger.info(f"Local set size: |U0|={len(U0)} |U1|={len(U1)} |U|={len(U)}")
@@ -212,7 +249,8 @@ def pcmci_shapley(
     pcmci_edges_svc = list(agg_strengths.keys())
 
     # 7) Edge fusion
-    trace_w = fuse_mod.extract_trace_weights(trace_graph, U)
+    # For ablation (w/o trace), we can drop all trace-based edges by providing an empty dict.
+    trace_w = fuse_mod.extract_trace_weights(trace_graph, U) if cfg.use_trace else {}
     fused = fuse_mod.fuse_edge_weights(trace_w, agg_strengths, I_scores, cfg)
     fused = fuse_mod.apply_conflict_penalty(fused, pcmci_edges_svc, cfg.gamma)
     norm_w = fuse_mod.normalize_incoming_weights(fused, U)
@@ -227,10 +265,32 @@ def pcmci_shapley(
     logger.info("Propagation completed")
     t6 = time.time(); logger.info(f"TIMER propagation: {(t6 - t5):.3f}s")
 
-    # 9) Shapley values
-    shapley = shap_mod.compute_shapley_values(U, norm_w, delta, cfg)
-    shapley_norm = shap_mod.normalize_shapley(shapley)
-    logger.info("Shapley values computed")
+    # 9) Attribution: Shapley (default) vs graph-centrality baselines
+    attribution_method = (cfg.attribution_method or "shapley").lower()
+    if attribution_method == "shapley":
+        shapley = shap_mod.compute_shapley_values(U, norm_w, delta, cfg)
+        shapley_norm = shap_mod.normalize_shapley(shapley)
+        logger.info("Shapley values computed")
+    else:
+        # Build a directed graph for PageRank / RandomWalk style attribution
+        G_attr = nx.DiGraph()
+        for (i, j), w in norm_w.items():
+            G_attr.add_edge(i, j, weight=w)
+
+        # PageRank-style score as attribution baseline
+        try:
+            pr_alpha = float(os.environ.get("PAGERANK_ALPHA", "0.85"))
+        except Exception:
+            pr_alpha = 0.85
+
+        pr_scores = nx.pagerank(G_attr, alpha=pr_alpha, weight="weight") if G_attr.number_of_nodes() > 0 else {s: 0.0 for s in U}
+        shapley = pr_scores
+        shapley_norm = utils_mod.min_max_normalize(pr_scores)
+
+        if attribution_method == "pagerank":
+            logger.info("Using PageRank attribution instead of Shapley (cfg.attribution_method=pagerank)")
+        else:
+            logger.info(f"Using RandomWalk-style attribution baseline (cfg.attribution_method={cfg.attribution_method})")
     t7 = time.time(); logger.info(f"TIMER shapley: {(t7 - t6):.3f}s")
 
     # 10) Scoring & ranking

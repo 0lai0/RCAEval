@@ -63,6 +63,9 @@ if is_py310():
         run,
         pcmci_shapley,
         tracerca,
+        # PCMCI-Shapley ablation variants (RQ2/RQ3)
+        pcmci_shapley_notrace,
+        pcmci_shapley_noshapley,
     )
 
 elif is_py38():

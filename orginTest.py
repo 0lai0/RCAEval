@@ -63,6 +63,9 @@ if is_py310():
         run,
         tracerca,
         pcmci_shapley,
+        # PCMCI-Shapley ablation variants (RQ2/RQ3)
+        pcmci_shapley_notrace,
+        pcmci_shapley_noshapley,
     )
     # Add GNN+KAN method
     try:
@@ -120,7 +123,8 @@ def parse_args():
             "e_diagnosis", "easyrca", "fci_pagerank", "fci_randomwalk", "ges_pagerank",
             "granger_pagerank", "granger_randomwalk", "lingam_pagerank", "lingam_randomwalk",
             "micro_diag", "microcause", "microrank", "mscred", "nsigma", "ntlr_pagerank",
-            "ntlr_randomwalk", "pc_pagerank", "pc_randomwalk", "run", "tracerca", "pcmci_shapley"
+            "ntlr_randomwalk", "pc_pagerank", "pc_randomwalk", "run", "tracerca",
+            "pcmci_shapley", "pcmci_shapley_notrace", "pcmci_shapley_noshapley"
         ]
         if gnn_kan_rca is not None:
             available_methods.append("gnn_kan_rca")

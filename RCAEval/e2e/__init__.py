@@ -58,6 +58,33 @@ if is_py310():
     from .pcmci_shapley import pcmci_shapley
     from .mscred import mscred
     from .tracerca import tracerca
+
+    # ---- PCMCI-Shapley ablation variants for experiments (RQ2/RQ3) ----
+    def pcmci_shapley_notrace(data, inject_time=None, dataset=None, **kwargs):
+        """Ablation: disable trace-based constraints (w/o Trace)."""
+        from .pcmci_shapley_modules import PCMCIShapleyConfig
+
+        cfg = PCMCIShapleyConfig(use_trace=False)
+        return pcmci_shapley(
+            data,
+            inject_time,
+            dataset=dataset,
+            config=cfg,
+            **kwargs,
+        )
+
+    def pcmci_shapley_noshapley(data, inject_time=None, dataset=None, **kwargs):
+        """Ablation: replace Shapley attribution with PageRank baseline (w/o Shapley)."""
+        from .pcmci_shapley_modules import PCMCIShapleyConfig
+
+        cfg = PCMCIShapleyConfig(attribution_method="pagerank")
+        return pcmci_shapley(
+            data,
+            inject_time,
+            dataset=dataset,
+            config=cfg,
+            **kwargs,
+        )
 else:
     from .rcd import rcd
     from .mmrcd import mmrcd
