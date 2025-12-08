@@ -36,9 +36,9 @@ class PCMCIShapleyConfig:
     attribution_method: str = "shapley"
 
     # Scoring
-    score_alpha1: float = 0.5
-    score_alpha2: float = 0.3
-    score_alpha3: float = 0.2
+    score_alpha1: float = 0.8
+    score_alpha2: float = 0.1
+    score_alpha3: float = 0.1
     lambda_penalty: float = 1.0
 
     # Preprocessing
