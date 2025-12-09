@@ -1,9 +1,9 @@
 """
-Unified causal discovery module supporting multiple algorithms.
-Simplifies the causal graph construction process.
+PC-based causal discovery module.
+Simplified to use only the PC algorithm for instantaneous causal relationships.
 """
 from __future__ import annotations
-from typing import Dict, List, Any, Tuple, Literal
+from typing import Dict, List, Any, Tuple
 import os
 import numpy as np
 import pandas as pd
@@ -12,11 +12,8 @@ from tigramite import data_processing
 from tigramite.independence_tests.parcorr import ParCorr
 from tigramite.pcmci import PCMCI
 
-from .config import PCMCIShapleyConfig
+from .config import PCShapleyConfig
 from .utils import smart_fillna_matrix
-
-
-CausalMethod = Literal["pcmci", "pc", "ges", "fci", "lingam"]
 
 
 def prepare_data_matrix(
@@ -38,7 +35,6 @@ def prepare_data_matrix(
         Tuple of (data_matrix, column_names)
         data_matrix shape: (n_variables, n_timesteps)
     """
-    # Match columns by service prefix
     cols: List[str] = []
     for s in local_nodes:
         matched = [c for c in data.columns if c != "time" and (c == s or c.startswith(f"{s}_"))]
@@ -48,18 +44,15 @@ def prepare_data_matrix(
     if not cols:
         return np.array([]).reshape(0, 0), []
     
-    # Extract matrix and handle missing values
     X = data[cols].to_numpy(dtype=float)
     X = smart_fillna_matrix(X, method='forward_backward')
     
-    # PCA dimensionality reduction (optional)
     if use_pca and X.shape[1] > pca_components:
         from sklearn.decomposition import PCA
         pca = PCA(n_components=min(pca_components, X.shape[1]))
         X = pca.fit_transform(X)
         cols = [f"PC{i}" for i in range(X.shape[1])]
     
-    # Transpose to (variables, time)
     X = X.T
     return X, cols
 
@@ -79,70 +72,12 @@ def clean_data_matrix(X: np.ndarray, min_std: float = 1e-6) -> Tuple[np.ndarray,
     mask = std_vals > min_std
     X_clean = X[mask, :]
     
-    # Add minimal noise to near-constant variables
     for i in range(X_clean.shape[0]):
         if np.std(X_clean[i, :]) < min_std * 10:
             noise = np.random.normal(0, min_std, X_clean.shape[1])
             X_clean[i, :] += noise
     
     return X_clean, mask
-
-
-def run_pcmci(
-    X: np.ndarray,
-    tau_max: int = 5,
-    alpha: float = 0.05,
-    max_conds_dim: int | None = 3
-) -> Dict[str, Any]:
-    """
-    Run PCMCI+ algorithm for time-series causal discovery.
-    
-    Args:
-        X: Input matrix (variables, time)
-        tau_max: Maximum time lag to consider
-        alpha: Significance level for independence tests
-        max_conds_dim: Maximum conditioning set size
-        
-    Returns:
-        Dictionary with p_matrix, val_matrix, and graph
-    """
-    if X.size == 0 or X.shape[0] < 2:
-        raise ValueError(f"Insufficient data: shape={X.shape}")
-    
-    if X.shape[1] < tau_max + 2:
-        raise ValueError(f"Time series too short: {X.shape[1]} < {tau_max + 2}")
-    
-    # Clean data
-    X_clean, mask = clean_data_matrix(X)
-    
-    if X_clean.shape[0] < 2:
-        raise ValueError(f"Not enough variables after cleaning: {X_clean.shape[0]}")
-    
-    # Adjust max_conds_dim
-    if max_conds_dim is not None:
-        max_conds_dim = min(max_conds_dim, X_clean.shape[0] - 2)
-        max_conds_dim = max(1, max_conds_dim)
-    
-    # Run PCMCI
-    dataframe = data_processing.DataFrame(X_clean)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
-    
-    try:
-        report = pcmci.run_pcmci(
-            tau_max=tau_max,
-            pc_alpha=alpha,
-            max_conds_dim=max_conds_dim
-        )
-    except Exception as e:
-        # Return empty results on failure
-        n_vars = X_clean.shape[0]
-        report = {
-            "p_matrix": np.ones((n_vars, n_vars, tau_max + 1)),
-            "val_matrix": np.zeros((n_vars, n_vars, tau_max + 1)),
-            "graph": np.zeros((n_vars, n_vars))
-        }
-    
-    return report
 
 
 def run_pc(
@@ -166,7 +101,6 @@ def run_pc(
     
     X_clean, mask = clean_data_matrix(X)
 
-    # Z-score standardization improves PC stability on heterogeneous scales
     X_std = X_clean.copy()
     var_std = np.std(X_std, axis=1, keepdims=True)
     var_std[var_std == 0] = 1.0
@@ -175,11 +109,10 @@ def run_pc(
     if X_clean.shape[0] < 2:
         raise ValueError(f"Not enough variables after cleaning")
     
-    # Use tigramite's PC algorithm on lag-0 only
     dataframe = data_processing.DataFrame(X_std)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
+    # Note: We use tigramite's PCMCI class but only call run_pc_stable (PC algorithm)
+    causal_engine = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
     
-    # Allow environment overrides for sensitivity
     try:
         alpha_env = os.environ.get("PC_ALPHA")
         if alpha_env is not None:
@@ -194,32 +127,34 @@ def run_pc(
         pass
 
     try:
-        # Run PC algorithm (tau_max=0 means contemporaneous only)
-        results = pcmci.run_pc_stable(
+        results = causal_engine.run_pc_stable(
             pc_alpha=alpha,
             tau_max=0,
             max_conds_dim=max_conds_dim
         )
         
-        # Extract graph at lag 0
         graph = results['graph'][:, :, 0]
         
-    except Exception as e:
-        # Return empty graph on failure
+    except Exception:
         n_vars = X_clean.shape[0]
         graph = np.zeros((n_vars, n_vars))
     
-    # Fallback: if PC returns empty graph, use correlation thresholding
     if not np.any(graph):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "PC algorithm returned empty graph. Falling back to correlation-based edge detection. "
+            "This may produce less accurate causal relationships. "
+            "Consider adjusting PC_ALPHA or PC_MAXCONDS environment variables."
+        )
         try:
             thr = float(os.environ.get("CORR_THRESHOLD", "0.2"))
-            topk = int(os.environ.get("CORR_TOPK", "0"))  # 0 means no top-k limit
+            topk = int(os.environ.get("CORR_TOPK", "0"))
         except Exception:
             thr, topk = 0.2, 0
         corr = np.corrcoef(X_std)
         np.fill_diagonal(corr, 0.0)
         edges_idx = np.argwhere(np.abs(corr) >= thr)
-        # Optionally restrict to top-k absolute correlations per target
         if topk > 0 and edges_idx.size > 0:
             graph_fallback = np.zeros_like(corr)
             n_vars = corr.shape[0]
@@ -241,72 +176,35 @@ def run_pc(
 
 def extract_edges_and_strengths(
     report: Dict[str, Any],
-    method: CausalMethod,
-    alpha: float = 0.05,
-    tau_max: int = 5
+    alpha: float = 0.05
 ) -> Tuple[List[Tuple[int, int, int]], Dict[Tuple[int, int], float]]:
     """
-    Extract significant edges and their strengths from causal discovery results.
+    Extract significant edges and their strengths from PC results.
     
     Args:
-        report: Results from causal discovery algorithm
-        method: Which algorithm was used
-        alpha: Significance threshold
-        tau_max: Maximum time lag (for PCMCI)
+        report: Results from PC algorithm
+        alpha: Significance threshold (unused for PC but kept for compatibility)
         
     Returns:
         Tuple of (edges, edge_strengths)
-        edges: List of (cause_idx, effect_idx, lag)
+        edges: List of (cause_idx, effect_idx, lag=0)
         edge_strengths: Dict mapping (cause, effect) to strength [0,1]
     """
     edges: List[Tuple[int, int, int]] = []
     strengths: Dict[Tuple[int, int], float] = {}
     
-    if method == "pcmci":
-        # Extract from PCMCI p_matrix
-        pmat = report.get("p_matrix")
-        val = report.get("val_matrix")
-        
-        if pmat is None:
-            return edges, strengths
-        
-        C, E, T = pmat.shape
-        
-        # Find significant edges (lag > 0)
-        for i in range(C):
-            for j in range(E):
-                if i == j:
-                    continue
-                for tau in range(1, T):
-                    if pmat[i, j, tau] <= alpha:
-                        edges.append((i, j, tau))
-        
-        # Compute edge strengths
-        if val is not None:
-            for (i, j, _) in edges:
-                s = np.nanmax(np.abs(val[i, j, 1:]))
-                strengths[(i, j)] = float(min(1.0, max(0.0, s if np.isfinite(s) else 0.0)))
-        else:
-            # Use p-values as proxy
-            for (i, j, _) in edges:
-                p = np.nanmin(pmat[i, j, 1:])
-                strengths[(i, j)] = float(max(0.0, min(1.0, 1.0 - p)) if np.isfinite(p) else 0.0)
+    graph = report.get("graph")
     
-    elif method in ["pc", "ges", "fci"]:
-        # Extract from adjacency matrix (no time lags)
-        graph = report.get("graph")
-        
-        if graph is None:
-            return edges, strengths
-        
-        n_vars = graph.shape[0]
-        
-        for i in range(n_vars):
-            for j in range(n_vars):
-                if i != j and graph[i, j] != 0:
-                    edges.append((i, j, 0))  # lag=0 for instantaneous
-                    # Use absolute value as strength
-                    strengths[(i, j)] = float(min(1.0, abs(graph[i, j])))
+    if graph is None:
+        return edges, strengths
+    
+    n_vars = graph.shape[0]
+    
+    for i in range(n_vars):
+        for j in range(n_vars):
+            if i != j and graph[i, j] != 0:
+                edges.append((i, j, 0))
+                strengths[(i, j)] = float(min(1.0, abs(graph[i, j])))
     
     return edges, strengths
 
@@ -314,56 +212,43 @@ def extract_edges_and_strengths(
 def discover_causal_graph(
     data: pd.DataFrame,
     local_nodes: List[str],
-    config: PCMCIShapleyConfig,
-    method: CausalMethod = "pcmci"
+    config: PCShapleyConfig,
+    method: str = "pc"
 ) -> Dict[str, Any]:
     """
-    Unified interface for causal discovery.
+    PC-based causal discovery interface.
     
     Args:
         data: Input time series DataFrame
         local_nodes: List of nodes to include
         config: Configuration object
-        method: Causal discovery method to use
+        method: Causal discovery method (only "pc" is supported)
         
     Returns:
         Dictionary containing:
         - edges: List of causal edges
         - edge_strengths: Dict of edge strengths
-        - pcmci_graph: NetworkX graph
         - columns: Column names used
     """
-    # Prepare data
+    if method != "pc":
+        raise ValueError(f"Only 'pc' method is supported, got '{method}'")
+    
     X, cols = prepare_data_matrix(data, local_nodes, config.use_pca, config.pca_components)
     
     if X.size == 0:
         return {
             "edges": [],
             "edge_strengths": {},
-            "pcmci_graph": nx.DiGraph(),
             "columns": []
         }
     
-    # Run causal discovery
     try:
-        if method == "pcmci":
-            report = run_pcmci(X, config.tau_max, config.pcmci_alpha, config.pcmci_max_conds_dim)
-        elif method == "pc":
-            report = run_pc(X, config.pcmci_alpha, config.pcmci_max_conds_dim)
-        else:
-            raise NotImplementedError(f"Method {method} not yet implemented")
-        
-        # Extract edges and strengths
-        edges, strengths = extract_edges_and_strengths(
-            report, method, config.pcmci_alpha, config.tau_max
-        )
-        
-    except Exception as e:
-        # Fallback to empty graph
+        report = run_pc(X, config.pc_alpha, config.pc_max_conds_dim)
+        edges, strengths = extract_edges_and_strengths(report, config.pc_alpha)
+    except Exception:
         edges = []
         strengths = {}
     
-    # Build NetworkX graph
     G = nx.DiGraph()
     G.add_nodes_from(range(len(cols)))
     for (i, j, _tau) in edges:
@@ -372,7 +257,5 @@ def discover_causal_graph(
     return {
         "edges": edges,
         "edge_strengths": strengths,
-        "pcmci_graph": G,
         "columns": cols
     }
-

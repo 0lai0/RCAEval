@@ -61,7 +61,7 @@ if is_py310():
         pc_pagerank,
         pc_randomwalk,
         run,
-        pcmci_shapley,
+        pc_shapley,
         tracerca,
     )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 import networkx as nx
 
-from .config import PCMCIShapleyConfig
+from .config import PCShapleyConfig
 
 
 def extract_trace_weights(trace_graph: nx.DiGraph | None, local_nodes: List[str]) -> Dict[Tuple[str, str], float]:
@@ -17,28 +17,27 @@ def extract_trace_weights(trace_graph: nx.DiGraph | None, local_nodes: List[str]
     return weights
 
 
-def fuse_edge_weights(trace_w: Dict[Tuple[str, str], float], pcmci_strengths: Dict[Tuple[str, str], float], isolation_scores: Dict[str, float], cfg: PCMCIShapleyConfig) -> Dict[Tuple[str, str], float]:
+def fuse_edge_weights(trace_w: Dict[Tuple[str, str], float], pc_strengths: Dict[Tuple[str, str], float], isolation_scores: Dict[str, float], cfg: PCShapleyConfig) -> Dict[Tuple[str, str], float]:
     fused: Dict[Tuple[str, str], float] = {}
     nodes = set([i for i, _ in trace_w.keys()] + [j for _, j in trace_w.keys()])
-    nodes |= set([i for i, _ in pcmci_strengths.keys()] + [j for _, j in pcmci_strengths.keys()])
-    # Ensure isolation-selected nodes are included even if there are no trace/PCMCI edges
+    nodes |= set([i for i, _ in pc_strengths.keys()] + [j for _, j in pc_strengths.keys()])
     nodes |= set(isolation_scores.keys())
     for i in nodes:
         for j in nodes:
             if i == j:
                 continue
             tw = trace_w.get((i, j), 0.0)
-            ps = pcmci_strengths.get((i, j), 0.0)
+            ps = pc_strengths.get((i, j), 0.0)
             Ii = isolation_scores.get(i, 0.0)
             fused[(i, j)] = cfg.theta1 * tw + cfg.theta2 * ps + cfg.theta3 * Ii
     return fused
 
 
-def apply_conflict_penalty(weights: Dict[Tuple[str, str], float], pcmci_edges: List[Tuple[str, str]], gamma: float) -> Dict[Tuple[str, str], float]:
+def apply_conflict_penalty(weights: Dict[Tuple[str, str], float], pc_edges: List[Tuple[str, str]], gamma: float) -> Dict[Tuple[str, str], float]:
     penalized = dict(weights)
-    pcmci_set = set(pcmci_edges)
+    pc_set = set(pc_edges)
     for (i, j) in list(weights.keys()):
-        if (j, i) in pcmci_set and (i, j) in penalized:
+        if (j, i) in pc_set and (i, j) in penalized:
             penalized[(i, j)] = penalized[(i, j)] * (1.0 - gamma)
     return penalized
 
