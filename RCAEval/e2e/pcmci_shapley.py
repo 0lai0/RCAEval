@@ -52,7 +52,7 @@ def pcmci_shapley(
         handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
-        logger.propagate = False  # 防止重複輸出
+        logger.propagate = False  # Avoid duplicate log output
     logger.info("Starting pcmci_shapley pipeline")
     cfg = config or PCMCIShapleyConfig()
     cfg.validate()
@@ -94,7 +94,7 @@ def pcmci_shapley(
     if cfg.enable_pruning:
         from .pcmci_shapley_modules import pruning as prune_mod
         
-        # 獲取所有候選節點 (從 metric_mapping 提取服務名)
+        # Get all candidate nodes (service names from metric_mapping)
         all_candidates = list(pp.get("metric_mapping", {}).keys())
         
         # 應用組合剪枝
@@ -111,7 +111,7 @@ def pcmci_shapley(
         
         logger.info(f"Pruning: {len(all_candidates)} -> {len(pruned_nodes)} nodes")
         
-        # 更新 node_anomaly_ts 只保留剪枝後的節點
+        # Update node_anomaly_ts to only keep pruned nodes
         node_anomaly_ts_original = pp.get("node_anomaly_ts", {})
         node_anomaly_ts = {k: v for k, v in node_anomaly_ts_original.items() 
                            if k in pruned_nodes}
@@ -146,9 +146,9 @@ def pcmci_shapley(
     t3 = time.time(); logger.info(f"TIMER node_isolation: {(t3 - t2):.3f}s")
 
     # 6) Causal discovery using unified interface
-    # 確保所有序列長度一致，缺失者以 0 補齊
+    # Ensure all time series have the same length; pad missing ones with zeros
     try:
-        # 推斷時間長度：優先使用已有節點的長度，否則用 base_df 的行數
+        # Infer time-series length: prefer existing node series, otherwise fall back to base_df rows
         existing_series = [v for v in node_anomaly_ts.values() if isinstance(v, pd.Series) and len(v) > 0]
         series_len = len(existing_series[0]) if existing_series else int(base_df.shape[0])
     except Exception:
@@ -171,7 +171,7 @@ def pcmci_shapley(
             series_map[s] = pd.Series([0.0] * series_len, dtype=float)
 
     service_df = pd.DataFrame({s: series_map[s].values for s in U})
-    # 清理 NaN 值
+    # Clean NaN values
     service_df = service_df.fillna(0)
     # 移除常數列（標準差為0）
     service_df = service_df.loc[:, service_df.std() > 0]

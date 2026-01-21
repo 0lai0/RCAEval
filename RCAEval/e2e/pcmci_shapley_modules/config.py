@@ -39,33 +39,33 @@ class PCMCIShapleyConfig:
     anomaly_threshold: float = 3.0
     anomaly_method: str = "zscore"  # zscore or spot
 
-    # Pruning (新增)
+    # Pruning
     enable_pruning: bool = True
     pruning_max_hops: int = 2
     pruning_anomaly_percentile: float = 0.3
     pruning_min_nodes: int = 10
-    pruning_max_nodes: int = 20  # 剪枝後最多保留的節點數
+    pruning_max_nodes: int = 20  # Maximum number of nodes to keep after pruning
 
-    # PCMCI 優化 (新增)
-    pcmci_max_conds_dim: int | None = 3  # None 表示不限制
+    # PCMCI optimization
+    pcmci_max_conds_dim: int | None = 3  # None means no limit
     pcmci_max_conds_py: int | None = None
     pcmci_max_conds_px: int | None = None
 
-    # Phase 2: 平行化 (新增)
+    # Phase 2: Parallelization
     enable_parallel: bool = True
-    node_isolation_n_jobs: int = -1  # -1 表示使用所有核心
-    shapley_n_jobs: int = -1  # -1 表示使用所有核心
+    node_isolation_n_jobs: int = -1  # -1 means use all cores
+    shapley_n_jobs: int = -1  # -1 means use all cores
 
-    # Phase 2: Adaptive Sampling (新增)
+    # Phase 2: Adaptive Sampling
     adaptive_max_rounds: int = 2000
     adaptive_min_rounds: int = 100
-    adaptive_confidence: float = 0.95  # 95% 或 99%
-    adaptive_tolerance: float = 0.01  # 1% 相對誤差
-    adaptive_check_interval: int = 50  # 每 50 輪檢查一次
+    adaptive_confidence: float = 0.95  # 95% or 99%
+    adaptive_tolerance: float = 0.01  # 1% relative error
+    adaptive_check_interval: int = 50  # Check convergence every 50 rounds
 
-    # Phase 2: Shapley 緩存優化 (新增)
-    enable_shapley_cache: bool = True  # 是否啟用 coalition value 緩存
-    shapley_cache_size: int = 2048  # 每個進程的緩存大小（LRU cache 最大條目數）
+    # Phase 2: Shapley caching optimizations
+    enable_shapley_cache: bool = True  # Whether to enable coalition value caching
+    shapley_cache_size: int = 2048  # Cache size per process (max LRU entries)
 
     def validate(self) -> bool:
         assert self.causal_method in ["pcmci", "pc", "ges", "fci", "lingam"]
@@ -79,7 +79,7 @@ class PCMCIShapleyConfig:
         assert abs(self.score_alpha1 + self.score_alpha2 + self.score_alpha3 - 1.0) < 1e-9
         assert self.pruning_max_nodes >= self.pruning_min_nodes
         
-        # Phase 2 驗證
+        # Phase 2 validation
         assert self.node_isolation_n_jobs >= -1
         assert self.shapley_n_jobs >= -1
         assert self.adaptive_max_rounds >= self.adaptive_min_rounds
@@ -87,6 +87,6 @@ class PCMCIShapleyConfig:
         assert self.adaptive_confidence in [0.95, 0.99]
         assert 0 < self.adaptive_tolerance < 1
         assert self.adaptive_check_interval >= 10
-        assert self.shapley_cache_size >= 64  # 緩存大小至少為 64
+        assert self.shapley_cache_size >= 64  # Cache size must be at least 64
         
         return True

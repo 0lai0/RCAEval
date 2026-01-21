@@ -35,28 +35,28 @@ def safe_divide(numer: float, denom: float, default: float = 0.0) -> float:
 
 def forward_backward_interpolate(series: pd.Series) -> pd.Series:
     """
-    使用前向填充和後向填充的組合來處理缺失值
+    Handle missing values using a combination of forward-fill and back-fill.
     
     Args:
-        series: 包含可能缺失值的時間序列
+        series: Input time series that may contain missing values.
         
     Returns:
-        插值後的時間序列
+        Interpolated time series.
     """
     if series.isna().sum() == 0:
         return series
     
-    # 先進行前向填充
+    # First apply forward fill
     series_ffill = series.fillna(method='ffill')
     
-    # 再進行後向填充
+    # Then apply backward fill
     series_bfill = series_ffill.fillna(method='bfill')
     
-    # 如果開頭或結尾仍有 NaN，使用線性插值
+    # If there are still NaNs at the beginning or end, use linear interpolation
     if series_bfill.isna().sum() > 0:
         series_bfill = series_bfill.interpolate(method='linear')
     
-    # 最後的兜底：如果還有 NaN，使用均值填充
+    # Final fallback: if there are still NaNs, fill with the mean
     if series_bfill.isna().sum() > 0:
         mean_val = series_bfill.dropna().mean()
         if pd.isna(mean_val):
@@ -68,14 +68,14 @@ def forward_backward_interpolate(series: pd.Series) -> pd.Series:
 
 def smart_fillna_matrix(X: np.ndarray, method: str = 'forward_backward') -> np.ndarray:
     """
-    對矩陣進行智能缺失值填充
+    Perform intelligent missing-value imputation on a matrix.
     
     Args:
-        X: 輸入矩陣 (samples, features)
-        method: 填充方法 ('forward_backward', 'linear', 'mean')
+        X: Input matrix (samples, features).
+        method: Imputation method ('forward_backward', 'linear', 'mean').
         
     Returns:
-        填充後的矩陣
+        Imputed matrix.
     """
     if not np.isnan(X).any():
         return X
@@ -83,19 +83,19 @@ def smart_fillna_matrix(X: np.ndarray, method: str = 'forward_backward') -> np.n
     X_df = pd.DataFrame(X)
     
     if method == 'forward_backward':
-        # 對每一列進行前向-後向填充
+        # Apply forward-backward filling to each column
         for col in X_df.columns:
             X_df[col] = forward_backward_interpolate(X_df[col])
     elif method == 'linear':
-        # 線性插值
+        # Linear interpolation
         X_df = X_df.interpolate(method='linear', axis=0)
-        # 如果還有 NaN，使用前向-後向填充
+        # If there are still NaNs, apply forward-backward fill
         X_df = X_df.fillna(method='ffill').fillna(method='bfill')
     elif method == 'mean':
-        # 使用列均值填充
+        # Use column mean to fill remaining NaNs
         X_df = X_df.fillna(X_df.mean())
     
-    # 最後檢查：如果還有 NaN，填充為 0
+    # Final check: if there are still NaNs, fill with 0
     X_df = X_df.fillna(0.0)
     
     return X_df.values
@@ -103,32 +103,32 @@ def smart_fillna_matrix(X: np.ndarray, method: str = 'forward_backward') -> np.n
 
 def robust_standardize_with_interpolation(series: pd.Series, eps: float = 1e-9) -> pd.Series:
     """
-    使用插值處理缺失值的魯棒標準化
+    Robust standardization with interpolation for missing values.
     
     Args:
-        series: 輸入時間序列
-        eps: 防止除零的小常數
+        series: Input time series.
+        eps: Small constant to avoid division-by-zero.
         
     Returns:
-        標準化後的時間序列
+        Standardized time series.
     """
-    # 先進行插值處理
+    # First interpolate missing values
     series_interpolated = forward_backward_interpolate(series)
     
-    # 檢查插值後是否還有足夠的數據
+    # Check that there is enough data after interpolation
     if len(series_interpolated.dropna()) < 2:
         return pd.Series([0.0] * len(series), index=series.index)
     
-    # 使用魯棒統計量進行標準化
+    # Use robust statistics for standardization
     med = series_interpolated.median()
     mad = (series_interpolated - med).abs().median()
     
-    # 關鍵修復：確保 MAD 不會太小
+    # Critical fix: ensure MAD is not too small
     if mad < eps:
-        # 如果 MAD 太小，使用標準差作為替代
+        # If MAD is too small, fall back to standard deviation
         std_val = series_interpolated.std()
         if std_val < eps:
-            # 如果標準差也太小，添加微小的隨機噪聲
+            # If standard deviation is also too small, add small random noise
             noise = np.random.normal(0, eps, len(series_interpolated))
             series_interpolated = series_interpolated + noise
             mad = (series_interpolated - series_interpolated.median()).abs().median()

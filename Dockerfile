@@ -24,7 +24,7 @@ RUN apt-get update -y && \
         libgirepository1.0-dev \
         && rm -rf /var/lib/apt/lists/*
 
-# 安裝 Python 3.10 和 3.8
+# Install Python 3.10 and 3.8
 RUN add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update -y && \
     apt-get install -y \
@@ -38,7 +38,7 @@ RUN add-apt-repository ppa:deadsnakes/ppa && \
         python3.8-distutils \
         && rm -rf /var/lib/apt/lists/*
 
-# 分別安裝 pip - 修復 Python 3.8 的 pip 安裝問題
+# Install pip for each Python version - fix pip installation issue for Python 3.8
 RUN wget https://bootstrap.pypa.io/get-pip.py && \
     python3.10 get-pip.py && \
     rm get-pip.py
@@ -47,7 +47,7 @@ RUN wget https://bootstrap.pypa.io/pip/3.8/get-pip.py && \
     python3.8 get-pip.py && \
     rm get-pip.py
 
-# 設置 Python 3.10 為預設
+# Set Python 3.10 as the default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
@@ -57,7 +57,7 @@ WORKDIR /app
 # 複製專案文件
 COPY . .
 
-# 創建 default 環境 (Python 3.10) - 修復依賴順序問題
+# Create default environment (Python 3.10) - fix dependency ordering issues
 RUN python3.10 -m venv env && \
     . env/bin/activate && \
     pip install --upgrade pip==20.0.2 && \
@@ -65,7 +65,7 @@ RUN python3.10 -m venv env && \
     pip install numpy && \
     pip install -e .[default]
 
-# 創建 RCD 環境 (Python 3.8)
+# Create RCD environment (Python 3.8)
 RUN python3.8 -m venv env-rcd && \
     . env-rcd/bin/activate && \
     pip install --upgrade pip==20.0.2 && \
@@ -77,7 +77,7 @@ RUN python3.8 -m venv env-rcd && \
 RUN chmod +x script/link.sh && \
     bash script/link.sh || true
 
-# 安裝 PyRCA (用於 HT 和 E-Diagnosis 方法)
+# Install PyRCA (used by HT and E-Diagnosis methods)
 RUN . env/bin/activate && \
     git clone https://github.com/salesforce/PyRCA.git /tmp/PyRCA && \
     cd /tmp/PyRCA && \
@@ -85,23 +85,23 @@ RUN . env/bin/activate && \
     cd /app && \
     rm -rf /tmp/PyRCA
 
-# 創建數據目錄
+# Create data and results directories
 RUN mkdir -p data results
 
-# 設置權限
+# Set permissions
 RUN chmod -R 755 /app
 
-# 健康檢查
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python --version || exit 1
 
-# 暴露常用端口（如需要 web 介面）
+# Expose commonly used ports (for web interfaces etc.)
 EXPOSE 8080 8888
 
-# 設置標籤
+# Set image labels
 LABEL maintainer="RCAEval Project"
 LABEL description="Docker environment for RCAEval benchmark - Root Cause Analysis for Microservice Systems"
 LABEL version="1.1.2"
 
-# 預設命令：啟動 default 環境的 bash
+# Default command: start bash in the default environment
 CMD ["/bin/bash", "-c", "source env/bin/activate && echo 'RCAEval environment ready. Use env-rcd for RCD-specific tasks.' && /bin/bash"]

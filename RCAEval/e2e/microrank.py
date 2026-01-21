@@ -436,7 +436,7 @@ def calculate_spectrum_without_delay_list(
             result[node] = (spectrum[node]["ef"] + spectrum[node]["np"]) / (spectrum[node]["ef"] +
                                                                             spectrum[node]["np"] + 2 * spectrum[node]["nf"] + 2 * spectrum[node]["ep"])
 
-    # Top-n节点列表
+    # Top-n node list
     top_list = []
     score_list = []
     for index, score in enumerate(sorted(result.items(), key=lambda x: x[1], reverse=True)):
@@ -572,20 +572,20 @@ def get_operation_slo(span_df):
 
 def get_pagerank_graph(df):
     """
-    Query the pagerank graph
+    Query the pagerank graph.
     
-    :return
-        operation_operation 存储子节点 Call graph
-        operation_operation[operation_name] = [operation_name1 , operation_name1 ] 
-
-        operation_trace 存储trace经过了哪些operation, 右上角 coverage graph
-        operation_trace[traceid] = [operation_name1 , operation_name2]
-
-        trace_operation 存储 operation被哪些trace 访问过, 左下角 coverage graph
-        trace_operation[operation_name] = [traceid1, traceid2]  
+    Returns
+        operation_operation: call graph storing child operations
+        operation_operation[operation_name] = [operation_name1, operation_name2]
+    
+        operation_trace: coverage graph (top-right) storing which operations each trace passes through
+        operation_trace[traceid] = [operation_name1, operation_name2]
+    
+        trace_operation: coverage graph (bottom-left) storing which traces visit each operation
+        trace_operation[operation_name] = [traceid1, traceid2]
         
-        pr_trace: 存储trace id 经过了哪些operation，不去重
-        pr_trace[traceid] = [operation_name1 , operation_name2]
+        pr_trace: mapping from trace id to the sequence of operations it passes (without deduplication)
+        pr_trace[traceid] = [operation_name1, operation_name2]
     """
     operation_operation = {}
     operation_trace = {}

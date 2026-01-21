@@ -60,29 +60,29 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
     if X.size == 0:
         raise ValueError("Empty input matrix")
     
-    # 數據預處理：移除常數列
+    # Data pre-processing: remove constant columns
     X_clean = X.copy()
     
-    # 移除常數列（標準差為0），使用更嚴格的閾值
-    std_mask = np.std(X_clean, axis=1) > 1e-6  # 更嚴格的閾值，避免 tigramite 內部標準化失敗
+    # Remove constant columns (std == 0) with a stricter threshold to avoid tigramite internal normalization failures
+    std_mask = np.std(X_clean, axis=1) > 1e-6
     X_clean = X_clean[std_mask, :]
     
     print(f"After constant removal: {X_clean.shape[0]} variables remaining")
     print(f"Remaining std values: {np.std(X_clean, axis=1)}")
     
-    # 檢查是否還有足夠的變量
+    # Check that there are still enough variables
     if X_clean.shape[0] < 2:
         raise ValueError(f"Not enough variables after cleaning: {X_clean.shape[0]} variables remaining")
     
-    # 檢查時間序列長度
+    # Check that time series is long enough
     if X_clean.shape[1] < tau_max + 2:
         raise ValueError(f"Time series too short: {X_clean.shape[1]} < {tau_max + 2}")
     
-    # 額外的數據預處理：確保每個變量都有足夠的變異
+    # Additional preprocessing: ensure each variable has enough variance
     for i in range(X_clean.shape[0]):
         var_std = np.std(X_clean[i, :])
         if var_std < 1e-6:
-            # 如果變異太小，添加微小的隨機噪聲
+            # If variance is too small, add small random noise
             noise = np.random.normal(0, 1e-6, X_clean.shape[1])
             X_clean[i, :] = X_clean[i, :] + noise
             print(f"Added noise to variable {i} (std was {var_std:.2e})")
@@ -90,17 +90,17 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
     print(f"Final input matrix stats: min={X_clean.min():.6f}, max={X_clean.max():.6f}")
     print(f"Final std values: {np.std(X_clean, axis=1)}")
     
-    # 創建 DataFrame 並運行 PCMCI
+    # Create tigramite DataFrame and run PCMCI
     dataframe = data_processing.DataFrame(X_clean)
     pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
     
-    # 動態調整 max_conds_dim
+    # Dynamically adjust max_conds_dim
     if max_conds_dim is None:
         max_conds_dim_actual = None
     else:
-        # 確保不超過變量數
+        # Ensure it does not exceed the number of variables
         max_conds_dim_actual = min(max_conds_dim, X_clean.shape[0] - 2)
-        # 確保至少為 1
+        # Ensure at least 1
         max_conds_dim_actual = max(1, max_conds_dim_actual)
     
     try:
@@ -108,11 +108,11 @@ def run_pcmci_plus(X: np.ndarray, tau_max: int, alpha: float,
             tau_max=tau_max, 
             pc_alpha=alpha, 
             max_conds_dim=max_conds_dim_actual,
-            max_conds_py=None,  # 可選：限制 Y 的條件集
-            max_conds_px=None   # 可選：限制 X 的條件集
+            max_conds_py=None,  # Optional: limit conditioning set on Y
+            max_conds_px=None   # Optional: limit conditioning set on X
         )
     except Exception as e:
-        # 如果 PCMCI 失敗，記錄詳細錯誤信息並返回空結果
+        # If PCMCI fails, log detailed diagnostics and return a neutral result
         print(f"PCMCI failed: {e}")
         print(f"Input matrix shape: {X_clean.shape}")
         print(f"Input matrix stats: min={X_clean.min():.6f}, max={X_clean.max():.6f}")
@@ -166,7 +166,7 @@ def local_pcmci_causal_test(data: pd.DataFrame, local_nodes: List[str], config: 
         X, 
         tau_max=config.tau_max, 
         alpha=config.pcmci_alpha,
-        max_conds_dim=config.pcmci_max_conds_dim  # 傳遞參數
+        max_conds_dim=config.pcmci_max_conds_dim  # Pass through configuration
     )
     edges = extract_significant_edges(report, alpha=config.pcmci_alpha)
     strengths = compute_edge_strength(report, edges)

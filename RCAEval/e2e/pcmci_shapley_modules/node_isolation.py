@@ -24,10 +24,10 @@ def compute_lagged_correlation(focus: pd.Series, other: pd.Series, tau_max: int)
 
 def statistical_neighborhood(focus_node: str, node_anomaly_ts: Dict[str, pd.Series], tau_max: int, top_m1: int, n_jobs: int = -1) -> List[str]:
     """
-    平行化版本的統計鄰域計算
+    Parallelized computation of the statistical neighborhood.
     
     Args:
-        n_jobs: 平行化進程數 (-1 表示使用所有核心)
+        n_jobs: Number of parallel jobs (-1 means all cores).
     """
     focus = node_anomaly_ts.get(focus_node)
     if focus is None:

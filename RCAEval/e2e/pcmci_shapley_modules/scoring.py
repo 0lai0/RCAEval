@@ -10,51 +10,51 @@ from .utils import min_max_normalize
 
 def compute_reachability(focus_node: str, edge_weights: Dict[Tuple[str, str], float], local_nodes: List[str]) -> Dict[str, float]:
     """
-    計算從每個節點到 focus_node 的可達性分數
-    使用最短路徑算法（Dijkstra）替代枚舉所有路徑，大幅提升性能
+    Compute reachability scores from each node to the focus_node.
+    Uses Dijkstra's shortest-path algorithm instead of enumerating all paths
+    to greatly improve performance.
     
-    可達性 = max_{path s->focus} ∏_{edges in path} w_{edge}
-    等價於：log(reachability) = max_{path s->focus} Σ_{edges in path} log(w_{edge})
-    使用負 log 權重 Dijkstra 來找最大值路徑（理論上等價）
+    Reachability = max_{path s->focus} ∏_{edges in path} w_{edge}
+    Equivalent to: log(reachability) = max_{path s->focus} Σ_{edges in path} log(w_{edge})
+    We use Dijkstra with negative log weights to find the maximum-product path (theoretically equivalent).
     
-    理論等價性證明：
-    1. 原始問題：找 max ∏ w_i = max Σ log(w_i)
-    2. 轉換：min -Σ log(w_i) = min Σ (-log(w_i))
-    3. Dijkstra 找 min Σ weight_i，其中 weight_i = -log(w_i)
-    4. 因此結果完全等價
+    Sketch of theoretical equivalence:
+    1. Original problem: find max ∏ w_i = max Σ log(w_i)
+    2. Transform: min -Σ log(w_i) = min Σ (-log(w_i))
+    3. Dijkstra finds min Σ weight_i, with weight_i = -log(w_i)
+    4. Therefore the result is equivalent to maximizing the product.
     
-    注意：權重 w ∈ [0, 1]（歸一化後），所以 -log(w) ≥ 0，Dijkstra 可正常工作
-    數值穩定性：使用 epsilon 避免 w=0 時 log(0) 的問題
+    Note: weights w ∈ [0, 1] (after normalization), so -log(w) ≥ 0 and Dijkstra works as usual.
+    Numerical stability: use epsilon to avoid log(0) when w = 0.
     """
-    # 建立圖，使用負 log 權重（Dijkstra 找最小路徑，我們要找最大乘積路徑）
-    # 使用小的 epsilon 避免數值問題（w 接近 0 時 log 會很大）
+    # Build a directed graph with negative log weights
+    # Use a small epsilon to avoid numerical issues when w is close to 0
     EPSILON = 1e-10
     G = nx.DiGraph()
     for (i, j), w in edge_weights.items():
         if w > EPSILON:
-            # 使用負 log，這樣 Dijkstra 最小路徑 = 原始最大乘積路徑
-            # 限制 log 的輸入值，避免數值溢出
+            # Use negative log so that Dijkstra's shortest path corresponds to max-product path
+            # Clamp input to log to avoid overflow
             w_clamped = max(EPSILON, min(w, 1.0))
             G.add_edge(i, j, weight=-math.log(w_clamped))
     
     r: Dict[str, float] = {}
     
-    # 從 focus_node 開始反向搜索（更高效，只需要一次 Dijkstra）
-    # 建立反向圖
+    # Run a single Dijkstra search from focus_node on the reversed graph
     G_rev = G.reverse(copy=True)
     
-    # 使用單源最短路徑算法（Dijkstra）從 focus_node 反向搜索
+    # Use single-source shortest path (Dijkstra) from focus_node on the reversed graph
     try:
-        # 使用 Dijkstra 計算從 focus_node 到所有節點的最短距離（在反向圖中）
-        # 這樣只需要一次算法調用，而不是對每個節點都調用
-        cutoff_value = len(local_nodes) * 2  # 合理的 cutoff
+        # Dijkstra from focus_node to all nodes in the reversed graph
+        # Only one call is needed instead of per-node calls
+        cutoff_value = len(local_nodes) * 2  # Reasonable cutoff
         distances = nx.single_source_dijkstra_path_length(
             G_rev, focus_node, weight='weight', cutoff=cutoff_value
         )
     except (nx.NetworkXNoPath, nx.NodeNotFound):
         distances = {}
     
-    # 計算可達性分數
+    # Compute reachability scores
     for s in local_nodes:
         if s == focus_node:
             r[s] = 1.0
@@ -62,7 +62,7 @@ def compute_reachability(focus_node: str, edge_weights: Dict[Tuple[str, str], fl
         if s not in distances:
             r[s] = 0.0
             continue
-        # 距離是負 log 權重，所以 exp(-distance) 就是原始權重乘積
+        # Distance is negative log weight, so exp(-distance) recovers the original product of weights
         r[s] = math.exp(-distances[s])
     
     return r
@@ -70,12 +70,12 @@ def compute_reachability(focus_node: str, edge_weights: Dict[Tuple[str, str], fl
 
 def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge_strengths: Dict[Tuple[str, str], float], graph: nx.DiGraph, lambda_penalty: float, local_nodes: List[str]) -> Dict[str, float]:
     """
-    計算時間一致性懲罰（優化版本）
-    使用 BFS 限制深度，避免枚舉所有路徑造成的性能問題
+    Compute temporal consistency penalties (optimized version).
+    Uses BFS with limited depth instead of enumerating all paths to avoid exponential blow-up.
     """
     p: Dict[str, float] = {s: 1.0 for s in local_nodes}
     
-    # 限制搜索深度，避免指數爆炸
+    # Limit search depth to avoid exponential explosion
     max_depth = min(5, len(local_nodes))
     
     for s in local_nodes:
@@ -85,9 +85,9 @@ def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge
             continue
         
         penalty_sum = 0.0
-        visited_edges = set()  # 避免重複計算同一條邊
+        visited_edges = set()  # Avoid double-counting the same edge
         
-        # 使用 BFS 限制深度搜索
+        # Use BFS with bounded depth
         queue = deque([(s, [s], 0)])  # (current_node, path, depth)
         
         while queue:
@@ -96,7 +96,7 @@ def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge
             if depth > max_depth:
                 continue
             
-            # 檢查路徑上的時間違反
+            # Check for temporal violations along the path
             for u, v in zip(path[:-1], path[1:]):
                 tu = anomaly_time.get(u, None)
                 tv = anomaly_time.get(v, None)
@@ -106,16 +106,16 @@ def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge
                         penalty_sum += float(edge_strengths.get(edge_key, 0.0))
                         visited_edges.add(edge_key)
             
-            # 如果到達目標，不需要繼續
+            # If we reached focus_node, we don't need to expand further
             if node == focus_node:
                 continue
             
-            # 繼續搜索
+            # Continue exploring neighbors
             for neighbor in graph.successors(node):
-                if neighbor not in path:  # 避免循環
+                if neighbor not in path:  # Avoid cycles
                     queue.append((neighbor, path + [neighbor], depth + 1))
         
-        # 如果沒有找到違反，penalty_sum = 0，p[s] = 1.0
+        # If no violation is found, penalty_sum = 0 and p[s] = 1.0
         p[s] = float(math.exp(-lambda_penalty * penalty_sum)) if penalty_sum > 0 else 1.0
     
     return p

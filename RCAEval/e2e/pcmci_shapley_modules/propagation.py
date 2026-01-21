@@ -28,9 +28,9 @@ def propagate_one_step(current_h: Dict[str, float], edge_weights: Dict[Tuple[str
 
 def propagate_k_steps(initial_delta: Dict[str, float], edge_weights: Dict[Tuple[str, str], float], K: int, alpha_prop: float) -> Dict[str, object]:
     """
-    主入口：自動選擇快速或原始版本
+    Main entry point: automatically choose between fast or original implementation.
     """
-    # 使用快速版本 (內部會自動判斷是否適用)
+    # Use the fast version (it will decide internally whether it is applicable)
     return fast_propagate_k_steps(initial_delta, edge_weights, K, alpha_prop, use_sparse=True)
 
 
@@ -42,12 +42,12 @@ def fast_propagate_k_steps(
     use_sparse: bool = True
 ) -> Dict[str, object]:
     """
-    使用稀疏矩陣加速的傳播版本
+    Propagation implementation accelerated by sparse matrices.
     
     Args:
-        use_sparse: 是否使用稀疏矩陣 (節點數 > 20 時建議啟用)
+        use_sparse: Whether to use sparse matrices (recommended when node count > 20).
     """
-    # 當節點數過少或邊數過少時，使用原始方法
+    # For small graphs or few edges, fall back to the original implementation
     all_nodes = set(initial_delta.keys())
     all_nodes.update([i for i, j in edge_weights.keys()])
     all_nodes.update([j for i, j in edge_weights.keys()])
@@ -56,12 +56,12 @@ def fast_propagate_k_steps(
         # 回退到原始實作
         return _propagate_k_steps_original(initial_delta, edge_weights, K, alpha_prop)
     
-    # 建立節點索引
+    # Build node index
     nodes = sorted(all_nodes)
     node_idx = {n: i for i, n in enumerate(nodes)}
     N = len(nodes)
     
-    # 建立稀疏鄰接矩陣 (轉置以便矩陣乘法)
+    # Build sparse adjacency matrix (transposed for matrix multiplication)
     # A[j, i] = alpha * w(i -> j)
     row, col, data = [], [], []
     for (i, j), w in edge_weights.items():
@@ -72,18 +72,18 @@ def fast_propagate_k_steps(
         data.append(alpha_prop * float(w))
     
     if not data:
-        # 沒有有效邊，返回初始值
+        # No valid edges, return initial values
         return {"h_final": dict(initial_delta), "h_by_step": [dict(initial_delta)]}
     
     A = sp.csr_matrix((data, (row, col)), shape=(N, N))
     
-    # 初始化向量
+    # Initialize vectors
     h0 = np.zeros(N, dtype=float)
     for node, val in initial_delta.items():
         if node in node_idx:
             h0[node_idx[node]] = float(val)
     
-    # 迭代傳播: h_{k+1} = A @ h_k
+    # Iterative propagation: h_{k+1} = A @ h_k
     h_accum = h0.copy()
     h_curr = h0.copy()
     h_by_step = [_vec_to_dict(h0, nodes)]
@@ -99,7 +99,7 @@ def fast_propagate_k_steps(
 
 
 def _vec_to_dict(vec: np.ndarray, nodes: List[str]) -> Dict[str, float]:
-    """向量轉回字典"""
+    """Convert vector back to a dict keyed by node."""
     return {nodes[i]: float(vec[i]) for i in range(len(nodes)) if vec[i] != 0}
 
 
@@ -109,7 +109,7 @@ def _propagate_k_steps_original(
     K: int, 
     alpha_prop: float
 ) -> Dict[str, object]:
-    """原始實作 (保留作為備份)"""
+    """Original propagation implementation (kept as a backup)."""
     h_accum: Dict[str, float] = {k: float(v) for k, v in initial_delta.items()}
     h_curr: Dict[str, float] = dict(initial_delta)
     h_by_step: List[Dict[str, float]] = [dict(h_curr)]

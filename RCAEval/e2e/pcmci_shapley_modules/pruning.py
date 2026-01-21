@@ -1,5 +1,5 @@
 """
-節點剪枝模組 - 減少需要分析的節點數量
+Node pruning module - reduce the number of nodes that need to be analyzed.
 """
 from __future__ import annotations
 from typing import Dict, List, Set
@@ -15,22 +15,22 @@ def trace_based_prefiltering(
     max_hops: int = 2
 ) -> List[str]:
     """
-    基於 trace 圖的預過濾：只保留與 focus_node 在 max_hops 跳內的節點
+    Trace-graph-based pre-filtering: keep only nodes within max_hops of focus_node.
     
     Args:
-        all_nodes: 所有候選節點列表
-        trace_graph: 服務依賴圖 (trace)
-        focus_node: 焦點節點 (SLI 服務)
-        max_hops: 最大跳數 (預設 2)
+        all_nodes: List of all candidate nodes.
+        trace_graph: Service dependency graph (trace).
+        focus_node: Focus node (SLI service).
+        max_hops: Maximum hop distance (default 2).
     
-    Returns:
-        過濾後的節點列表
+        Returns:
+        Filtered list of nodes.
     """
     if trace_graph is None or focus_node not in all_nodes:
         return all_nodes
     
     if focus_node not in trace_graph:
-        # focus_node 不在 trace 圖中，保留所有節點
+        # focus_node is not in trace graph; keep all nodes
         return all_nodes
     
     reachable: Set[str] = {focus_node}
@@ -47,7 +47,7 @@ def trace_based_prefiltering(
         reachable.update(new_frontier)
         frontier = new_frontier
     
-    # 保留在 all_nodes 中且可達的節點
+    # Keep reachable nodes that are in all_nodes
     filtered = [n for n in all_nodes if n in reachable]
     return filtered
 
@@ -59,13 +59,13 @@ def early_anomaly_pruning(
     max_nodes: int = 50
 ) -> List[str]:
     """
-    早期異常分數剪枝：只保留異常分數較高的節點
+    Early anomaly-score pruning: keep only nodes with higher anomaly scores.
     
     Args:
-        node_anomaly: 各節點的異常分數 (字典或 Series)
-        threshold_percentile: 保留的百分位數 (0.3 表示保留 top 70%)
-        min_nodes: 最少保留的節點數
-        max_nodes: 最多保留的節點數
+        node_anomaly: Per-node anomaly scores (dict or Series).
+        threshold_percentile: Percentile cutoff to keep (0.3 means keep top 70%).
+        min_nodes: Minimum number of nodes to keep.
+        max_nodes: Maximum number of nodes to keep.
     
     Returns:
         過濾後的節點列表
@@ -76,28 +76,28 @@ def early_anomaly_pruning(
     if not node_anomaly:
         return []
     
-    # 移除 NaN 和負值
+    # Remove NaN and negative values
     valid_scores = {k: float(v) for k, v in node_anomaly.items() 
                     if np.isfinite(v) and v >= 0}
     
     if len(valid_scores) <= min_nodes:
         return list(valid_scores.keys())
     
-    # 計算閾值
+    # Compute threshold
     scores = list(valid_scores.values())
     threshold = np.percentile(scores, threshold_percentile * 100)
     
-    # 過濾
+    # Filter by threshold
     filtered = [n for n, score in valid_scores.items() if score >= threshold]
     
-    # 確保至少保留 min_nodes 個節點
+    # Ensure at least min_nodes are kept
     if len(filtered) < min_nodes:
         sorted_nodes = sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
         filtered = [n for n, _ in sorted_nodes[:min_nodes]]
     
-    # 確保不超過 max_nodes 個節點
+    # Ensure we do not exceed max_nodes
     if len(filtered) > max_nodes:
-        # 按異常分數排序，保留前 max_nodes 個
+        # Sort by anomaly score and keep top max_nodes
         filtered_scores = {n: valid_scores[n] for n in filtered}
         sorted_filtered = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)
         filtered = [n for n, _ in sorted_filtered[:max_nodes]]
@@ -116,10 +116,10 @@ def combined_pruning(
     max_nodes: int = 50
 ) -> List[str]:
     """
-    組合剪枝策略：先 trace 過濾，再異常分數過濾
+    Combined pruning strategy: first trace-based filtering, then anomaly-score filtering.
     
     Returns:
-        最終過濾後的節點列表
+        Final list of filtered nodes.
     """
     # Step 1: Trace-based filtering
     step1 = trace_based_prefiltering(all_nodes, trace_graph, focus_node, max_hops)
@@ -130,11 +130,11 @@ def combined_pruning(
     else:
         node_anomaly_dict = dict(node_anomaly)
     
-    # 只考慮 step1 中的節點
+    # Only consider nodes from step1
     step1_anomaly = {k: v for k, v in node_anomaly_dict.items() if k in step1}
     step2 = early_anomaly_pruning(step1_anomaly, anomaly_percentile, min_nodes, max_nodes)
     
-    # 確保 focus_node 一定保留
+    # Ensure focus_node is always kept
     if focus_node not in step2 and focus_node in all_nodes:
         step2 = [focus_node] + step2
     

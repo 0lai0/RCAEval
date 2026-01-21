@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def compute_system_anomaly(coalition: Set[str], local_nodes: List[str], edge_weights: Dict[Tuple[str, str], float], K: int, alpha_prop: float, node_init: Dict[str, float] | None = None) -> float:
-    """計算 coalition 的系統異常值（每次調用都會執行傳播計算，無緩存）"""
+    """Compute the system anomaly value of a coalition (always runs propagation, no caching)."""
     # Only keep initial anomalies for nodes in coalition; others set to 0
     init = {s: (node_init.get(s, 0.0) if node_init is not None else 0.0) for s in local_nodes}
     for s in list(init.keys()):
@@ -24,14 +24,14 @@ def compute_system_anomaly(coalition: Set[str], local_nodes: List[str], edge_wei
 
 def _make_cached_value_func(base_value_func: Callable[[Set[str]], float], cache_size: int = 2048) -> Tuple[Callable[[Set[str]], float], Dict]:
     """
-    創建帶緩存的 value function wrapper
+    Create a cached wrapper around the value function.
     
     Args:
-        base_value_func: 原始的 coalition value function
-        cache_size: 緩存大小（LRU cache 的最大條目數）
+        base_value_func: Original coalition value function.
+        cache_size: Cache size (maximum number of LRU entries).
     
     Returns:
-        (cached_value_func, cache_stats_dict) - 帶緩存的函數和緩存統計信息
+        (cached_value_func, cache_stats_dict) - cached function and cache statistics.
     """
     cache: Dict[Tuple[str, ...], float] = {}
     cache_hits = 0
@@ -40,7 +40,7 @@ def _make_cached_value_func(base_value_func: Callable[[Set[str]], float], cache_
     def cached_func(coalition: Set[str]) -> float:
         nonlocal cache_hits, cache_misses
         
-        # 使用排序的 tuple 作為 cache key（Set 無法直接作為 dict key）
+        # Use a sorted tuple as the cache key (set cannot be used as a dict key)
         key = tuple(sorted(coalition))
         
         if key in cache:
@@ -50,9 +50,9 @@ def _make_cached_value_func(base_value_func: Callable[[Set[str]], float], cache_
         cache_misses += 1
         value = base_value_func(coalition)
         
-        # 簡單的 LRU：如果緩存太大，刪除最舊的條目（簡單策略：隨機刪除）
+        # Simple LRU: if cache is too large, drop the oldest entries (simple strategy: drop first few keys)
         if len(cache) >= cache_size:
-            # 刪除最早的幾個條目（簡單的 LRU 近似）
+            # Remove the first few entries (simple LRU approximation)
             keys_to_remove = list(cache.keys())[:cache_size // 4]
             for k in keys_to_remove:
                 del cache[k]
@@ -68,7 +68,7 @@ def _make_cached_value_func(base_value_func: Callable[[Set[str]], float], cache_
         stats["size"] = len(cache)
         return stats
     
-    # 附加統計函數
+    # Attach statistics function
     cached_func.get_stats = get_stats  # type: ignore
     
     return cached_func, stats
@@ -76,38 +76,38 @@ def _make_cached_value_func(base_value_func: Callable[[Set[str]], float], cache_
 
 def compute_shapley_sampling(local_nodes: List[str], value_func: Callable[[Set[str]], float], R: int, rng: np.random.Generator | None = None, n_jobs: int = -1, enable_cache: bool = True, cache_size: int = 2048) -> Dict[str, float]:
     """
-    平行化版本的 Shapley 採樣（帶緩存優化）
+    Parallel Shapley sampling with caching optimizations.
     
     Args:
-        local_nodes: 本地節點列表
-        value_func: Coalition value 函數
-        R: 採樣輪數
-        rng: 隨機數生成器
-        n_jobs: 平行化進程數 (-1 表示使用所有核心)
-        enable_cache: 是否啟用緩存
-        cache_size: 每個進程的緩存大小
+        local_nodes: List of local nodes.
+        value_func: Coalition value function.
+        R: Number of sampling rounds.
+        rng: Random number generator.
+        n_jobs: Number of parallel jobs (-1 means all cores).
+        enable_cache: Whether to enable caching.
+        cache_size: Cache size per worker process.
     """
     if rng is None:
         rng = np.random.default_rng(0)
     nodes = list(local_nodes)
     
-    # 決定是否使用平行化
+    # Decide whether to use parallelism
     if R <= 50 or n_jobs == 1 or len(nodes) <= 5:
-        # 小規模時使用原始方法（帶緩存）
+        # For small-scale cases, use the original (single-process) method with optional cache
         if enable_cache:
             cached_func, _ = _make_cached_value_func(value_func, cache_size=cache_size)
             return _compute_shapley_sampling_original(local_nodes, cached_func, R, rng)
         else:
             return _compute_shapley_sampling_original(local_nodes, value_func, R, rng)
     
-    # 平行化版本：將 R 個採樣分配到多個進程
-    # 每個進程會有自己的緩存實例
+    # Parallel version: distribute R samples across multiple processes,
+    # each with its own cache instance.
     def single_sample_shapley_with_cache(seed, base_func):
         """
-        單次採樣實作（進程內緩存）
-        每個進程都有獨立的緩存，避免重複計算相同 coalition
+        Single sampling implementation (with per-process cache).
+        Each process has its own cache to avoid recomputing the same coalitions.
         """
-        # 為每個進程創建獨立的緩存
+        # Create an independent cache for each process
         if enable_cache:
             cached_func, _ = _make_cached_value_func(base_func, cache_size=cache_size)
         else:
@@ -119,7 +119,7 @@ def compute_shapley_sampling(local_nodes: List[str], value_func: Callable[[Set[s
         local_rng.shuffle(perm)
         prefix = set()
         
-        # 在單個 permutation 中，prefix 會逐步增長，可以重用緩存
+        # Within a single permutation, prefix grows step by step, so the cache can be reused
         for s in perm:
             prefix_with_s = prefix | {s}
             marginal = cached_func(prefix_with_s) - cached_func(prefix)
@@ -128,13 +128,13 @@ def compute_shapley_sampling(local_nodes: List[str], value_func: Callable[[Set[s
         
         return phi_local
     
-    # 平行執行 R 個樣本
+    # Run R samples in parallel
     seeds = [rng.integers(0, 2**32) for _ in range(R)]
     results = Parallel(n_jobs=n_jobs)(
         delayed(single_sample_shapley_with_cache)(seed, value_func) for seed in seeds
     )
     
-    # 聚合結果
+    # Aggregate results
     phi = {s: 0.0 for s in nodes}
     for phi_local in results:
         for s, v in phi_local.items():
@@ -143,7 +143,7 @@ def compute_shapley_sampling(local_nodes: List[str], value_func: Callable[[Set[s
 
 
 def _compute_shapley_sampling_original(local_nodes: List[str], value_func: Callable[[Set[str]], float], R: int, rng: np.random.Generator | None = None) -> Dict[str, float]:
-    """原始版本 (保留作為備份)"""
+    """Original single-process version (kept as a backup)."""
     if rng is None:
         rng = np.random.default_rng(0)
     nodes = list(local_nodes)
@@ -171,23 +171,23 @@ def normalize_shapley(shapley_values: Dict[str, float]) -> Dict[str, float]:
 
 def compute_shapley_values(local_nodes: List[str], edge_weights: Dict[Tuple[str, str], float], node_init: Dict[str, float], cfg: PCMCIShapleyConfig) -> Dict[str, float]:
     """
-    計算 Shapley 值（帶緩存優化）
+    Compute Shapley values with caching optimizations.
     """
     def v(C: Set[str]) -> float:
         return compute_system_anomaly(C, local_nodes, edge_weights, K=cfg.K, alpha_prop=cfg.alpha_prop, node_init=node_init)
 
-    # 根據配置決定是否啟用緩存
+    # Decide whether to enable caching based on config
     enable_cache = cfg.enable_shapley_cache
     
     if cfg.shapley_method == "exact" and len(local_nodes) <= 15:
-        # Fallback to sampling with high R if exact not implemented yet
+        # Fallback to sampling with high R if exact is not implemented
         R = max(cfg.sampling_rounds, 2000)
         result = compute_shapley_sampling(
             local_nodes, v, R=R, n_jobs=cfg.shapley_n_jobs,
             enable_cache=enable_cache, cache_size=cfg.shapley_cache_size
         )
     elif cfg.shapley_method == "adaptive":
-        # Adaptive sampling（內部已使用緩存）
+        # Adaptive sampling (internally uses caching)
         result = compute_adaptive_shapley_sampling(local_nodes, v, cfg)
     else:
         # default sampling
@@ -205,12 +205,13 @@ def compute_adaptive_shapley_sampling(
     cfg: PCMCIShapleyConfig
 ) -> Dict[str, float]:
     """
-    自適應 Shapley 採樣：根據方差自動調整採樣輪數（帶緩存優化）
+    Adaptive Shapley sampling: automatically adjust the number of samples based on variance,
+    with caching optimizations.
     
     Args:
-        local_nodes: 本地節點列表
-        value_func: Coalition value 函數
-        cfg: 配置物件，包含 adaptive sampling 參數
+        local_nodes: List of local nodes.
+        value_func: Coalition value function.
+        cfg: Configuration object containing adaptive sampling parameters.
     """
     nodes = list(local_nodes)
     max_R = cfg.adaptive_max_rounds
@@ -219,7 +220,7 @@ def compute_adaptive_shapley_sampling(
     tolerance = cfg.adaptive_tolerance
     check_interval = cfg.adaptive_check_interval
     
-    # 創建帶緩存的 value function
+    # Create cached value function
     cached_func, cache_stats = _make_cached_value_func(
         value_func, 
         cache_size=cfg.shapley_cache_size
@@ -228,7 +229,7 @@ def compute_adaptive_shapley_sampling(
     phi_sum = {s: 0.0 for s in nodes}
     phi_sq_sum = {s: 0.0 for s in nodes}
     
-    # 初始採樣
+    # Initial sampling
     initial_samples = min(min_R, max_R)
     for r in range(initial_samples):
         phi_r = _single_sample_shapley(nodes, cached_func)
@@ -236,7 +237,7 @@ def compute_adaptive_shapley_sampling(
             phi_sum[s] += phi_r[s]
             phi_sq_sum[s] += phi_r[s] ** 2
     
-    # 自適應採樣
+    # Adaptive sampling loop
     final_r = initial_samples
     for r in range(initial_samples, max_R + 1):
         phi_r = _single_sample_shapley(nodes, cached_func)
@@ -246,7 +247,7 @@ def compute_adaptive_shapley_sampling(
         
         final_r = r + 1
         
-        # 每 check_interval 輪檢查一次收斂
+        # Check convergence every check_interval rounds
         if r % check_interval == 0 and r >= min_R:
             converged = True
             for s in nodes:
@@ -254,15 +255,15 @@ def compute_adaptive_shapley_sampling(
                 variance = (phi_sq_sum[s] / (r + 1)) - mean ** 2
                 std_err = np.sqrt(variance / (r + 1)) if variance > 0 else 0.0
                 
-                # 計算置信區間寬度
+                # Compute confidence interval width
                 if confidence == 0.95:
                     ci_width = 1.96 * std_err
                 elif confidence == 0.99:
                     ci_width = 2.58 * std_err
                 else:
-                    ci_width = 1.96 * std_err  # 預設 95%
+                    ci_width = 1.96 * std_err  # Default to 95%
                 
-                # 檢查是否收斂
+                # Check convergence condition
                 if abs(mean) > 1e-10 and ci_width > tolerance * abs(mean):
                     converged = False
                     break
@@ -272,7 +273,7 @@ def compute_adaptive_shapley_sampling(
                 logger.info(f"Adaptive Shapley converged at round {final_r}/{max_R}, cache hits={stats['hits']}, misses={stats['misses']}, hit_rate={stats['hits']/(stats['hits']+stats['misses']) if (stats['hits']+stats['misses']) > 0 else 0:.2%}")
                 break
     
-    # 輸出緩存統計
+    # Output cache statistics
     stats = cache_stats()
     if stats['hits'] + stats['misses'] > 0:
         hit_rate = stats['hits'] / (stats['hits'] + stats['misses'])
@@ -283,8 +284,8 @@ def compute_adaptive_shapley_sampling(
 
 def _single_sample_shapley(nodes: List[str], value_func: Callable[[Set[str]], float]) -> Dict[str, float]:
     """
-    單次 Shapley 採樣
-    注意：如果 value_func 已經帶緩存，這裡會自動受益
+    Single Shapley sampling round.
+    Note: if value_func is already cached, this automatically benefits from it.
     """
     rng = np.random.default_rng()
     phi_local = {s: 0.0 for s in nodes}
