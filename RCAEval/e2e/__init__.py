@@ -37,6 +37,7 @@ if is_py310():
         pass
     from .baro import baro, mmbaro, mmnsigma
     from .causalrca import causalrca
+    from .causalshap import causalshap
     from .circa import circa
     from .cloudranger import cloudranger
     from .fci_pagerank import fci_pagerank

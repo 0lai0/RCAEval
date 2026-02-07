@@ -38,6 +38,7 @@ if is_py310():
     from RCAEval.e2e import (
         baro,
         causalrca,
+        causalshap,
         circa,
         cloudranger,
         cmlp_pagerank,
