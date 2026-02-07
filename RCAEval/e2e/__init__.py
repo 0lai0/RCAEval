@@ -56,7 +56,6 @@ if is_py310():
     )
     from .run import run
     from .pc_shapley import pc_shapley
-    from .pcmci_shapley import pcmci_shapley  # Deprecated, backward compatibility
     from .mscred import mscred
     from .tracerca import tracerca
 else:

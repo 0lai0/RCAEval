@@ -1,8 +1,8 @@
 import pytest
 import pandas as pd
 import numpy as np
-from RCAEval.e2e.pcmci_shapley import pcmci_shapley
-from RCAEval.e2e.pcmci_shapley_modules import PCMCIShapleyConfig
+from RCAEval.e2e.pc_shapley import pc_shapley
+from RCAEval.e2e.pc_shapley_modules import PCShapleyConfig
 
 
 def test_pcmci_shapley_with_pruning():
@@ -18,14 +18,14 @@ def test_pcmci_shapley_with_pruning():
     })
     
     # 配置: 啟用剪枝
-    config = PCMCIShapleyConfig(
+    config = PCShapleyConfig(
         enable_pruning=True,
         pruning_max_hops=1,
         pruning_min_nodes=2,
         sampling_rounds=100  # 減少採樣以加快測試
     )
     
-    result = pcmci_shapley(data, config=config, dataset="test")
+    result = pc_shapley(data, config=config, dataset="test")
     
     assert 'ranks' in result
     assert 'adj' in result
@@ -45,15 +45,15 @@ def test_pruning_reduces_computation():
     })
     
     # 不啟用剪枝
-    config_no_prune = PCMCIShapleyConfig(enable_pruning=False, sampling_rounds=50)
+    config_no_prune = PCShapleyConfig(enable_pruning=False, sampling_rounds=50)
     start = time.time()
-    result1 = pcmci_shapley(data, config=config_no_prune, dataset="test")
+    result1 = pc_shapley(data, config=config_no_prune, dataset="test")
     time_no_prune = time.time() - start
     
     # 啟用剪枝
-    config_prune = PCMCIShapleyConfig(enable_pruning=True, sampling_rounds=50)
+    config_prune = PCShapleyConfig(enable_pruning=True, sampling_rounds=50)
     start = time.time()
-    result2 = pcmci_shapley(data, config=config_prune, dataset="test")
+    result2 = pc_shapley(data, config=config_prune, dataset="test")
     time_prune = time.time() - start
     
     # 應該要更快

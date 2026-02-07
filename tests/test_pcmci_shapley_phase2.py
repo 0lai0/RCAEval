@@ -1,8 +1,8 @@
 import pytest
 import pandas as pd
 import numpy as np
-from RCAEval.e2e.pcmci_shapley import pcmci_shapley
-from RCAEval.e2e.pcmci_shapley_modules import PCMCIShapleyConfig
+from RCAEval.e2e.pc_shapley import pc_shapley
+from RCAEval.e2e.pc_shapley_modules import PCShapleyConfig
 
 
 def test_parallel_node_isolation():
@@ -19,22 +19,22 @@ def test_parallel_node_isolation():
     })
     
     # 測試平行化版本
-    config_parallel = PCMCIShapleyConfig(
+    config_parallel = PCShapleyConfig(
         enable_parallel=True,
         node_isolation_n_jobs=2,
         sampling_rounds=50
     )
     
-    result_parallel = pcmci_shapley(data, config=config_parallel, dataset="test")
+    result_parallel = pc_shapley(data, config=config_parallel, dataset="test")
     
     # 測試非平行化版本
-    config_serial = PCMCIShapleyConfig(
+    config_serial = PCShapleyConfig(
         enable_parallel=False,
         node_isolation_n_jobs=1,
         sampling_rounds=50
     )
     
-    result_serial = pcmci_shapley(data, config=config_serial, dataset="test")
+    result_serial = pc_shapley(data, config=config_serial, dataset="test")
     
     # 結果應該相同
     assert len(result_parallel['ranks']) == len(result_serial['ranks'])
@@ -52,22 +52,22 @@ def test_parallel_shapley_sampling():
     })
     
     # 測試平行化版本
-    config_parallel = PCMCIShapleyConfig(
+    config_parallel = PCShapleyConfig(
         enable_parallel=True,
         shapley_n_jobs=2,
         sampling_rounds=200
     )
     
-    result_parallel = pcmci_shapley(data, config=config_parallel, dataset="test")
+    result_parallel = pc_shapley(data, config=config_parallel, dataset="test")
     
     # 測試非平行化版本
-    config_serial = PCMCIShapleyConfig(
+    config_serial = PCShapleyConfig(
         enable_parallel=False,
         shapley_n_jobs=1,
         sampling_rounds=200
     )
     
-    result_serial = pcmci_shapley(data, config=config_serial, dataset="test")
+    result_serial = pc_shapley(data, config=config_serial, dataset="test")
     
     # 結果應該相同
     assert len(result_parallel['ranks']) == len(result_serial['ranks'])
@@ -83,7 +83,7 @@ def test_adaptive_sampling():
     })
     
     # 測試 adaptive sampling
-    config_adaptive = PCMCIShapleyConfig(
+    config_adaptive = PCShapleyConfig(
         shapley_method="adaptive",
         adaptive_max_rounds=500,
         adaptive_min_rounds=50,
@@ -91,7 +91,7 @@ def test_adaptive_sampling():
         adaptive_check_interval=25
     )
     
-    result = pcmci_shapley(data, config=config_adaptive, dataset="test")
+    result = pc_shapley(data, config=config_adaptive, dataset="test")
     
     assert 'ranks' in result
     assert len(result['ranks']) > 0
@@ -109,18 +109,18 @@ def test_phase2_performance():
     })
     
     # Phase 1 配置
-    config_phase1 = PCMCIShapleyConfig(
+    config_phase1 = PCShapleyConfig(
         enable_parallel=False,
         shapley_method="sampling",
         sampling_rounds=200
     )
     
     start = time.time()
-    result1 = pcmci_shapley(data, config=config_phase1, dataset="test")
+    result1 = pc_shapley(data, config=config_phase1, dataset="test")
     time_phase1 = time.time() - start
     
     # Phase 2 配置
-    config_phase2 = PCMCIShapleyConfig(
+    config_phase2 = PCShapleyConfig(
         enable_parallel=True,
         node_isolation_n_jobs=2,
         shapley_n_jobs=2,
@@ -131,7 +131,7 @@ def test_phase2_performance():
     )
     
     start = time.time()
-    result2 = pcmci_shapley(data, config=config_phase2, dataset="test")
+    result2 = pc_shapley(data, config=config_phase2, dataset="test")
     time_phase2 = time.time() - start
     
     # Phase 2 應該更快

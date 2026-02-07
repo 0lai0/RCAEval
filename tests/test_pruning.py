@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import networkx as nx
-from RCAEval.e2e.pcmci_shapley_modules import pruning
+from RCAEval.e2e.pc_shapley_modules import pruning
 
 
 def test_trace_based_prefiltering():
