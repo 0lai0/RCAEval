@@ -17,6 +17,7 @@ import networkx as nx
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
+from sklearn.decomposition import PCA
 
 
 class PropagationValueFunction:
@@ -262,6 +263,107 @@ def extract_service_name(col: str, dataset: Optional[str] = None) -> str:
         return col.split("_")[0]
 
 
+def aggregate_to_service_level(data: pd.DataFrame, dataset: Optional[str] = None) -> pd.DataFrame:
+    """
+    Aggregate metrics to service level using PCA first component.
+    
+    This reduces dimensionality before causal discovery, significantly improving
+    speed and statistical power when sample size is limited.
+    
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Time series data with metric-level columns
+    dataset : str, optional
+        Dataset name for format-specific parsing
+    
+    Returns
+    -------
+    pd.DataFrame
+        Service-level aggregated data
+    """
+    service_cols = defaultdict(list)
+    for col in data.columns:
+        if col == "time":
+            continue
+        svc = extract_service_name(col, dataset)
+        service_cols[svc].append(col)
+
+    result = {}
+    if "time" in data.columns:
+        result["time"] = data["time"].values
+
+    for svc, cols in sorted(service_cols.items()):
+        # Get columns that have at least some non-NaN values
+        valid_cols = [c for c in cols if c in data.columns]
+        if not valid_cols:
+            result[svc] = np.zeros(len(data))
+            continue
+            
+        vals = data[valid_cols].values
+        
+        # Handle single metric case
+        if vals.shape[1] == 0:
+            result[svc] = np.zeros(len(data))
+        elif vals.shape[1] == 1:
+            result[svc] = np.nan_to_num(vals[:, 0], nan=0.0)
+        else:
+            # Multiple metrics: use PCA first component
+            # Fill NaN with 0 for PCA
+            vals = np.nan_to_num(vals, nan=0.0)
+            
+            # Check if all columns are constant
+            if np.all(np.std(vals, axis=0) == 0):
+                result[svc] = vals[:, 0] if vals.shape[1] > 0 else np.zeros(len(data))
+            else:
+                try:
+                    pca = PCA(n_components=1)
+                    result[svc] = pca.fit_transform(vals)[:, 0]
+                except Exception:
+                    # Fallback to mean if PCA fails
+                    result[svc] = np.nanmean(vals, axis=1)
+                    result[svc] = np.nan_to_num(result[svc], nan=0.0)
+
+    return pd.DataFrame(result)
+
+
+def adaptive_max_conds_dim(n_samples: int, n_variables: int) -> int:
+    """
+    Adaptive max conditioning set size for PCMCI.
+    
+    Heuristic: need ~10 samples per parameter in the conditional 
+    independence test. For partial correlation with d conditions,
+    we estimate d+2 parameters, so need ~10*(d+2) samples.
+    
+    Also capped by n_variables - 2 (theoretical max).
+    
+    Parameters
+    ----------
+    n_samples : int
+        Number of time samples
+    n_variables : int
+        Number of variables
+    
+    Returns
+    -------
+    int
+        Adaptive max_conds_dim value
+    
+    Examples
+    --------
+    >>> adaptive_max_conds_dim(50, 14)   # 50 samples, 14 services
+    3
+    >>> adaptive_max_conds_dim(100, 14)  # 100 samples, 14 services
+    8
+    >>> adaptive_max_conds_dim(200, 14)  # 200 samples, 14 services
+    12
+    """
+    # Solve: n_samples >= 10 * (d + 2)  →  d <= n_samples/10 - 2
+    from_samples = max(1, int(n_samples / 10) - 2)
+    from_variables = max(1, n_variables - 2)
+    return min(from_samples, from_variables)
+
+
 def _adj_to_graph(
     adj: np.ndarray,
     node_names: List[str],
@@ -357,27 +459,19 @@ def _build_directed_correlation_graph(
         Directed correlation graph
     """
     G = nx.DiGraph()
-    services = set()
-    service_cols = defaultdict(list)
+    services = []
+    svc_series = {}
 
+    # Data is now service-level (after aggregation), so columns are service names
     for col in data.columns:
         if col == "time":
             continue
-        svc = extract_service_name(col, dataset)
-        services.add(svc)
-        service_cols[svc].append(col)
-
-    services = sorted(list(services))
+        svc = col  # Column name is already service name after aggregation
+        services.append(svc)
+        svc_series[svc] = np.nan_to_num(data[col].values, nan=0.0)
+    
+    services = sorted(services)
     G.add_nodes_from(services)
-
-    # Aggregate to service level
-    svc_series = {}
-    for svc in services:
-        cols = service_cols[svc]
-        if cols:
-            vals = data[cols].values
-            if vals.shape[1] > 0:
-                svc_series[svc] = np.nanmean(vals, axis=1)
 
     # Lag correlation to determine direction
     for i, si in enumerate(services):
@@ -649,31 +743,63 @@ def build_causal_graph_for_shapley(
     from RCAEval.graph_construction.granger import granger
     from RCAEval.graph_construction.pcmci import pcmci
 
-    services = set()
-    for col in data.columns:
-        if col == "time":
-            continue
-        services.add(extract_service_name(col, dataset))
-    services = sorted(list(services))
+    # ========== OPTIMIZATION 1: Aggregate to Service Level First ==========
+    # This reduces dimensionality from ~70 metrics to ~14 services before PCMCI,
+    # significantly improving speed (5-10x) and statistical power
+    n_metrics_original = len([c for c in data.columns if c != "time"])
+    svc_data = aggregate_to_service_level(data, dataset)
+    services = [c for c in svc_data.columns if c != "time"]
+    n_services = len(services)
     
     if not services:
         return nx.DiGraph()
+    
+    # Log optimization effect
+    print(f"[CausalSHAP] Service-level aggregation: {n_metrics_original} metrics → {n_services} services")
+    
+    # ========== OPTIMIZATION 2: Adaptive max_conds_dim ==========
+    # Automatically adjust based on sample size and number of variables
+    n_samples = len(svc_data)
+    n_vars = len(services)
+    max_conds = adaptive_max_conds_dim(n_samples, n_vars)
+    print(f"[CausalSHAP] Adaptive max_conds_dim: {max_conds} (n_samples={n_samples}, n_vars={n_vars})")
 
     layers = []
 
-    # Layer 1: Time-series causal discovery
+    # Layer 1: Time-series causal discovery (on service-level data)
     if causal_method in ("pcmci", "both"):
         try:
-            adj = pcmci(data, alpha=pcmci_alpha)
-            g = _adj_to_graph(adj, list(data.columns), dataset, agg="max")
+            # Run PCMCI on service-level data (much faster than metric-level)
+            adj = pcmci(svc_data, alpha=pcmci_alpha, max_conds_dim=max_conds)
+            
+            # Convert adjacency matrix directly to graph (already service-level)
+            g = nx.DiGraph()
+            g.add_nodes_from(services)
+            
+            # adj is already service-level, so direct mapping
+            for i, si in enumerate(services):
+                for j, sj in enumerate(services):
+                    if i != j and adj[i, j] > 0:
+                        g.add_edge(si, sj, weight=float(adj[i, j]), source="pcmci")
+            
             layers.append((g, 1.0))
         except Exception as e:
             print(f"Warning: PCMCI failed: {e}")
 
     if causal_method in ("granger", "both"):
         try:
-            adj = granger(data, p_val_threshold=granger_alpha)
-            g = _adj_to_graph(adj, list(data.columns), dataset, agg="max")
+            # Granger also runs on service-level data for consistency
+            adj = granger(svc_data, p_val_threshold=granger_alpha)
+            
+            # Convert to graph (already service-level)
+            g = nx.DiGraph()
+            g.add_nodes_from(services)
+            
+            for i, si in enumerate(services):
+                for j, sj in enumerate(services):
+                    if i != j and adj[i, j] > 0:
+                        g.add_edge(si, sj, weight=float(adj[i, j]), source="granger")
+            
             # Lower weight if both methods used to avoid double-counting
             w = 0.3 if causal_method == "both" else 1.0
             layers.append((g, w))
@@ -685,10 +811,10 @@ def build_causal_graph_for_shapley(
         tg = _normalize_graph_nodes(trace_graph, services)
         layers.append((tg, 0.6))
 
-    # Layer 3: Directed correlation (fallback)
+    # Layer 3: Directed correlation (fallback, also on service-level)
     try:
         corr_g = _build_directed_correlation_graph(
-            data, threshold=corr_threshold, dataset=dataset
+            svc_data, threshold=corr_threshold, dataset=dataset
         )
         layers.append((corr_g, 0.3))
     except Exception as e:

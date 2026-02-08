@@ -68,7 +68,22 @@ def _gather_tau(p_matrix: np.ndarray) -> np.ndarray:
     return np.array(link_matrix)
 
 
-def pcmci(data, tau_max=3, alpha=0.2):
+def pcmci(data, tau_max=3, alpha=0.2, max_conds_dim=None):
+    """
+    PCMCI causal discovery with adaptive max_conds_dim support.
+    
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Time series data
+    tau_max : int, default=3
+        Maximum time lag
+    alpha : float, default=0.2
+        Significance level
+    max_conds_dim : int, optional
+        Maximum dimension of conditioning set. If None, uses default (unlimited).
+        Adaptive setting recommended: ~n_samples/10 - 2
+    """
     nodes = data.columns.to_list()
 
     dataframe = data_processing.DataFrame(data.to_numpy())
@@ -77,7 +92,7 @@ def pcmci(data, tau_max=3, alpha=0.2):
     report = m.run_pcmci(
         tau_max=tau_max,
         pc_alpha=alpha,
-        max_conds_dim=None,
+        max_conds_dim=max_conds_dim,
     )
 
     matrix = _gather_tau(report["p_matrix"])

@@ -224,11 +224,11 @@ def process(data_path):
         sli = "front-end_cpu"
         if f"{service}_lat_90" in data:
             sli = f"{service}_lat_90"
-    elif "train-ticket" in data_path or "fse-tt" in data_path or "RE2-TT" in data_path:
+    elif "train-ticket" in data_path or "fse-tt" in data_path or "RE2-TT" in data_path or "RE3-TT" in data_path:
         sli = "ts-ui-dashboard_latency"
         if f"{service}_latency" in data:
             sli = f"{service}_latency"
-    elif "online-boutique" in data_path or "fse-ob" in data_path or "RE2-OB" in data_path or "RE2-SS" in data_path:
+    elif "online-boutique" in data_path or "fse-ob" in data_path or "RE2-OB" in data_path or "RE2-SS" in data_path or "RE3-OB" in data_path or "RE3-SS" in data_path:
         sli = "frontend_latency"
         if f"{service}_latency" in data:
             sli = f"{service}_latency"

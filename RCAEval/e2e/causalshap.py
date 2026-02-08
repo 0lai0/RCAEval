@@ -337,17 +337,34 @@ def causalshap(
         phase_elapsed = time.time() - phase_start
         _log_phase_end("2: Causal Graph Construction", phase_elapsed, verbose)
     except Exception as e:
-        _log_with_timestamp(f"[CausalSHAP] Warning: Causal graph construction failed: {e}", verbose)
-        _log_with_timestamp("[CausalSHAP] Falling back to anomaly score ranking", verbose)
+        _log_with_timestamp(f"[CausalSHAP] Warning: Causal graph construction failed: {e}", verbose, always=True)
+        _log_with_timestamp(
+            "[CausalSHAP] Fallback mode: Using anomaly score ranking (NOT using CausalSHAP method)",
+            verbose,
+            always=True
+        )
         ranked = sorted(anomaly_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Format results for evaluation (same as main return)
+        ranks = [s for s, _ in ranked]
+        shapley_values = dict(ranked)
+        
+        if dataset in ["train-ticket", "mm-tt", "fse-tt", "re1-tt", "re2-tt", "re3-tt"]:
+            ranks = [f"ts-{s}" if not s.startswith("ts-") else s for s in ranks]
+            shapley_values = {
+                f"ts-{s}" if not s.startswith("ts-") else s: v 
+                for s, v in shapley_values.items()
+            }
+        
         total_elapsed = time.time() - start_time
         _log_with_timestamp(
-            f"[CausalSHAP] ===== CausalSHAP Pipeline END (total elapsed: {total_elapsed:.3f}s) =====",
-            verbose
+            f"[CausalSHAP] ===== CausalSHAP Pipeline END (FALLBACK MODE, total elapsed: {total_elapsed:.3f}s) =====",
+            verbose,
+            always=True
         )
         return {
-            "ranks": [s for s, _ in ranked],
-            "shapley_values": dict(ranked),
+            "ranks": ranks,
+            "shapley_values": shapley_values,
         }
 
     # ========== Phase 3: Shapley Value Computation ==========
@@ -375,6 +392,13 @@ def causalshap(
             verbose
         )
         
+        # Mark that we successfully used CausalSHAP method
+        _log_with_timestamp(
+            "[CausalSHAP] Using CausalSHAP method (Shapley values with causal propagation)",
+            verbose,
+            always=True
+        )
+        
         if verbose:
             _log_with_timestamp("[CausalSHAP] Top 5 Shapley values:", verbose)
             for svc, val in ranked[:5]:
@@ -383,13 +407,58 @@ def causalshap(
         phase_elapsed = time.time() - phase_start
         _log_phase_end("3: Shapley Value Computation", phase_elapsed, verbose)
     except Exception as e:
-        _log_with_timestamp(f"[CausalSHAP] Warning: Shapley computation failed: {e}", verbose)
-        _log_with_timestamp("[CausalSHAP] Falling back to anomaly score ranking", verbose)
+        _log_with_timestamp(f"[CausalSHAP] Warning: Shapley computation failed: {e}", verbose, always=True)
+        _log_with_timestamp(
+            "[CausalSHAP] Fallback mode: Using anomaly score ranking (NOT using CausalSHAP method)",
+            verbose,
+            always=True
+        )
         ranked = sorted(
             anomaly_scores.items(), key=lambda x: x[1], reverse=True
         )
         phase_elapsed = time.time() - phase_start
         _log_phase_end("3: Shapley Value Computation (fallback)", phase_elapsed, verbose)
+        
+        # Format results for evaluation (same as main return)
+        ranks = [s for s, _ in ranked]
+        shapley_values = dict(ranked)
+        
+        if dataset in ["train-ticket", "mm-tt", "fse-tt", "re1-tt", "re2-tt", "re3-tt"]:
+            ranks = [f"ts-{s}" if not s.startswith("ts-") else s for s in ranks]
+            shapley_values = {
+                f"ts-{s}" if not s.startswith("ts-") else s: v 
+                for s, v in shapley_values.items()
+            }
+        
+        total_elapsed = time.time() - start_time
+        _log_with_timestamp(
+            f"[CausalSHAP] ===== CausalSHAP Pipeline END (FALLBACK MODE, total elapsed: {total_elapsed:.3f}s) =====",
+            verbose,
+            always=True
+        )
+        return {
+            "ranks": ranks,
+            "shapley_values": shapley_values,
+        }
+
+    # ========== Format Results for Evaluation ==========
+    # For train-ticket dataset, ground truth uses "ts-" prefix in service names
+    # We need to add it back to match the evaluation format
+    ranks = [s for s, _ in ranked]
+    shapley_values = {s: v for s, v in ranked}
+    
+    if dataset in ["train-ticket", "mm-tt", "fse-tt", "re1-tt", "re2-tt", "re3-tt"]:
+        # Add "ts-" prefix to match ground truth format
+        ranks = [f"ts-{s}" if not s.startswith("ts-") else s for s in ranks]
+        shapley_values = {
+            f"ts-{s}" if not s.startswith("ts-") else s: v 
+            for s, v in shapley_values.items()
+        }
+        if verbose:
+            _log_with_timestamp(
+                f"[CausalSHAP] Added 'ts-' prefix for train-ticket format compatibility",
+                verbose
+            )
 
     total_elapsed = time.time() - start_time
     _log_with_timestamp(
@@ -399,6 +468,6 @@ def causalshap(
     )
 
     return {
-        "ranks": [s for s, _ in ranked],
-        "shapley_values": {s: v for s, v in ranked},
+        "ranks": ranks,
+        "shapley_values": shapley_values,
     }
