@@ -68,7 +68,7 @@ def causalshap(
     data,
     inject_time=None,
     dataset=None,
-    n_permutations=1000,
+    n_permutations=5000,
     decay=0.7,
     propagation_mode="max",
     target_avg_degree=3.0,
@@ -394,7 +394,7 @@ def causalshap(
         
         # Mark that we successfully used CausalSHAP method
         _log_with_timestamp(
-            "[CausalSHAP] Using CausalSHAP method (Shapley values with causal propagation)",
+            "[CausalSHAP] ✅ Using CausalSHAP method (Shapley values with causal propagation)",
             verbose,
             always=True
         )
