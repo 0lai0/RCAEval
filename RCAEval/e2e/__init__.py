@@ -30,6 +30,8 @@ def rca(func):
             return {"adj": [], "node_names": dummy, "ranks": dummy}
     return wrapper
 
+from .graph_fastshap_method import graph_fastshap
+
 if is_py310():
     try:
         from .causalai import causalai

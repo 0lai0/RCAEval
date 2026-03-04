@@ -34,6 +34,8 @@ from RCAEval.utility import (
 )
 
 
+from RCAEval.e2e import graph_fastshap
+
 if is_py310():
     from RCAEval.e2e import (
         baro,
