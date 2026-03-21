@@ -223,3 +223,4 @@ output
 .DS_Store
 logparser/config.json
 logbatcher/config.json
+venv310
