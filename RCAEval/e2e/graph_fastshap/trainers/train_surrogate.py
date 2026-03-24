@@ -10,29 +10,34 @@ pass the masked graph through the surrogate, and optimise:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
 import numpy as np
+import pandas as pd
 
 
-def _make_label(anomal_df, sli, threshold: float = 2.0, eps: float = 1e-8):
-    """Compute a binary label: is the SLI anomalous?
-
-    We use a simple z-score approach: if the SLI deviation exceeds
-    *threshold* standard deviations from the normal mean, label = 1.
-    Because the caller already provides the anomal_df portion and we
-    are computing per-sample, we just check whether the SLI mean
-    deviation is large.
+def _compute_soft_label(anomal_df, sli, s, metric_cols, normal_mu, normal_sigma):
     """
-    if sli is None or sli not in anomal_df.columns:
-        return 1.0
-    vals = anomal_df[sli].to_numpy()
-    if np.std(vals) < eps:
-        return 1.0
-    return 1.0  # During anomal window the SLI is by definition anomalous
+    soft label = Weighted sum of deviations for retained metrics / Full deviations sum
+    Intuition: Masking root cause -> soft label drops -> Surrogate learns causation
+    """
+    # Dynamic smoothing to prevent noise amplification on stable metrics
+    dynamic_eps = float(np.median(normal_sigma))
+    if dynamic_eps < 1e-5:
+        dynamic_eps = 1e-5
+        
+    deviations = np.abs((anomal_df[metric_cols].mean().values - normal_mu) / (normal_sigma + dynamic_eps))
+    masked_devs = deviations * s.cpu().numpy()
+    full_dev_sum = deviations.sum() + dynamic_eps
+    return float(masked_devs.sum() / full_dev_sum)
 
 
 def train_surrogate(
     surrogate,
     hetero_data,
+    normal_df: pd.DataFrame,
+    anomal_df: pd.DataFrame,
+    metric_cols: list,
+    sli: str,
     n_epochs: int = 200,
     n_samples: int = 16,
     lr: float = 1e-3,
@@ -45,6 +50,10 @@ def train_surrogate(
     ----------
     surrogate : SurrogateGNN
     hetero_data : HeteroData
+    normal_df : pd.DataFrame
+    anomal_df : pd.DataFrame
+    metric_cols : list
+    sli : str
     n_epochs : int
     n_samples : int
         Number of random masks per epoch.
@@ -63,10 +72,15 @@ def train_surrogate(
 
     n_met = hetero_data["metric"].x.shape[0]
 
-    # The anomal window is label=1 by definition
-    label = torch.tensor([1.0], device=device)
+    # Calculate baseline stats for soft label computation
+    normal_vals = normal_df[metric_cols].to_numpy(dtype=np.float64)
+    normal_mu = np.mean(normal_vals, axis=0)
+    normal_sigma = np.std(normal_vals, axis=0)
+
+    # The anomal window is label=1 by definition for v_full
+    label_full = torch.tensor([1.0], device=device)
     # Also create a label=0 for the "fully masked" case (all metrics hidden)
-    label_healthy = torch.tensor([0.0], device=device)
+    label_empty = torch.tensor([0.0], device=device)
 
     for epoch in range(n_epochs):
         surrogate.train()
@@ -84,10 +98,14 @@ def train_surrogate(
             # -- L_pred: BCE -----------------------------------------------
             # v_full should be close to 1 (anomalous), v_empty close to 0
             loss_pred = (
-                F.binary_cross_entropy(v_full.unsqueeze(0), label)
-                + F.binary_cross_entropy(v_empty.unsqueeze(0), label_healthy)
-                + F.binary_cross_entropy(v_s.unsqueeze(0), label * s.mean().detach())
+                F.binary_cross_entropy(v_full.unsqueeze(0), label_full)
+                + F.binary_cross_entropy(v_empty.unsqueeze(0), label_empty)
             )
+            
+            # soft label computation
+            sl_val = _compute_soft_label(anomal_df, sli, s, metric_cols, normal_mu, normal_sigma)
+            label_s = torch.tensor([sl_val], device=device)
+            loss_pred += F.binary_cross_entropy(v_s.unsqueeze(0), label_s)
 
             # -- L_mono: monotonicity hinge --------------------------------
             # s' = s with one extra metric masked (removing an anomalous signal
@@ -106,6 +124,7 @@ def train_surrogate(
 
             optimiser.zero_grad()
             loss.backward()
+            clip_grad_norm_(surrogate.parameters(), max_norm=5.0)
             optimiser.step()
             epoch_loss += loss.item()
 

@@ -108,36 +108,63 @@ def graph_fastshap(
     mu = float(os.environ.get("GFS_MU", 0.1))
 
     # ==================================================================
-    # 4. Train Surrogate (M2)
+    # 4. Load Pre-trained Weights (Global Knowledge)
     # ==================================================================
-    surrogate = SurrogateGNN(
-        in_dim=feat_dim, hidden_dim=hidden_dim, n_layers=n_layers,
-    )
-    surrogate = train_surrogate(
-        surrogate, hetero_data,
-        n_epochs=surr_epochs, n_samples=n_samples,
-        lr=1e-3, mu=mu, device=device,
-    )
+    surr_path = f"checkpoints/{dataset}_surrogate.pt"
+    expl_path = f"checkpoints/{dataset}_explainer.pt"
+
+    if not os.path.exists(expl_path) or not os.path.exists(surr_path):
+        raise FileNotFoundError(f"Pre-trained weights not found for dataset {dataset}. Please run `python pretrain.py --dataset {dataset}` first.")
+
+    surrogate = SurrogateGNN(in_dim=feat_dim, hidden_dim=hidden_dim, n_layers=n_layers).to(device)
+    surrogate.load_state_dict(torch.load(surr_path, map_location=device))
+    
+    explainer = ExplainerGNN(in_dim=feat_dim, hidden_dim=hidden_dim, n_layers=n_layers).to(device)
+    explainer.load_state_dict(torch.load(expl_path, map_location=device))
+    
+    # ==================================================================
+    # 5. Local Adaptation / Online Fine-Tuning
+    # ==================================================================
+    ft_surr_epochs = int(os.environ.get("GFS_FT_SURR_EPOCHS", 5))
+    ft_expl_epochs = int(os.environ.get("GFS_FT_EXPL_EPOCHS", 5))
+    
+    if ft_surr_epochs > 0:
+        surrogate = train_surrogate(
+            surrogate, hetero_data,
+            normal_df=normal_df, anomal_df=anomal_df,
+            metric_cols=metric_cols, sli=sli,
+            n_epochs=ft_surr_epochs, n_samples=n_samples,
+            lr=1e-3, mu=mu, device=device,
+        )
+        
+    if ft_expl_epochs > 0:
+        explainer = train_explainer(
+            explainer, surrogate, hetero_data,
+            n_epochs=ft_expl_epochs, n_samples=n_samples,
+            lr=1e-3, gamma=gamma, lambda_=lambda_, device=device,
+        )
 
     # ==================================================================
-    # 5. Train Explainer (M3)
-    # ==================================================================
-    explainer = ExplainerGNN(
-        in_dim=feat_dim, hidden_dim=hidden_dim, n_layers=n_layers,
-    )
-    explainer = train_explainer(
-        explainer, surrogate, hetero_data,
-        n_epochs=expl_epochs, n_samples=n_samples,
-        lr=1e-3, gamma=gamma, lambda_=lambda_, device=device,
-    )
-
-    # ==================================================================
-    # 6. Inference (M4)
+    # 6. Inference + Ensemble
     # ==================================================================
     explainer.eval()
     with torch.no_grad():
-        phi_hat = explainer(hetero_data.to(device))
+        phi_hat = explainer(hetero_data.to(device)).cpu()
 
-    ranks = phi_to_ranks(phi_hat, metric_cols)
+    # Z-score deviation blending
+    normal_vals = normal_df[metric_cols].to_numpy(dtype=np.float64)
+    normal_mu = np.mean(normal_vals, axis=0)
+    normal_sigma = np.std(normal_vals, axis=0) + 1e-8
+    anomal_mean = anomal_df[metric_cols].mean().to_numpy(dtype=np.float64)
+    dev_scores = np.abs((anomal_mean - normal_mu) / normal_sigma)
+
+    phi_numpy = phi_hat.numpy()
+    phi_norm = (phi_numpy - phi_numpy.min()) / (phi_numpy.max() - phi_numpy.min() + 1e-8)
+    dev_norm = (dev_scores - dev_scores.min()) / (dev_scores.max() - dev_scores.min() + 1e-8)
+
+    # 70% Explainer SHAP + 30% Statistical Deviation
+    ensemble_phi = 0.7 * phi_norm + 0.3 * dev_norm
+
+    ranks = phi_to_ranks(ensemble_phi, metric_cols)
 
     return {"ranks": ranks}

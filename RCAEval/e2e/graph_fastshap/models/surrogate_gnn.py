@@ -10,7 +10,7 @@ HeteroConv(SAGEConv) x n_layers  -->  global readout  -->  MLP  -->  sigmoid
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import HeteroConv, SAGEConv, global_mean_pool
+from torch_geometric.nn import HeteroConv, SAGEConv, GraphConv, global_mean_pool
 
 
 class SurrogateGNN(nn.Module):
@@ -45,7 +45,7 @@ class SurrogateGNN(nn.Module):
         for layer_idx in range(n_layers):
             d_in = in_dim if layer_idx == 0 else hidden_dim
             conv_dict = {
-                ("service", "calls", "service"): SAGEConv(d_in, hidden_dim),
+                ("service", "calls", "service"): GraphConv(d_in, hidden_dim),
                 ("service", "owns", "metric"): SAGEConv((d_in, d_in), hidden_dim),
                 ("metric", "belongs_to", "service"): SAGEConv((d_in, d_in), hidden_dim),
             }
@@ -113,14 +113,14 @@ class SurrogateGNN(nn.Module):
 
         # --- edge masking (soft) for service-calls-service ----------------
         ss_key = ("service", "calls", "service")
-        ss_edge_weight = None
+        edge_weight_dict = {}
         if ss_key in hetero_data.edge_types and hasattr(hetero_data[ss_key], "edge_weight"):
-            ss_edge_weight = hetero_data[ss_key].edge_weight
+            edge_weight_dict[ss_key] = hetero_data[ss_key].edge_weight
 
         # --- message passing ----------------------------------------------
         for layer_idx, conv in enumerate(self.convs):
             x_prev = x_dict.copy()
-            x_dict = conv(x_dict, edge_index_dict)
+            x_dict = conv(x_dict, edge_index_dict, edge_weight_dict=edge_weight_dict)
 
             # ReLU + dropout + residual
             for ntype in x_dict:

@@ -13,12 +13,15 @@ Edge types
 - ``("metric", "belongs_to", "service")`` : reverse of *owns*
 """
 
+import os
+import hashlib
 import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 
 from .feature_engineer import compute_deviation_features
+from RCAEval.graph_construction.granger import granger
 
 
 # ---------------------------------------------------------------------------
@@ -59,26 +62,18 @@ def _extract_metric_type(col_name: str) -> str:
 # Correlation-based service graph
 # ---------------------------------------------------------------------------
 
-def _build_service_corr_edges(
+def _build_causal_edges(
     anomal_df: pd.DataFrame,
     service_names: list,
     service_cols: dict,
+    method: str = "granger",
     threshold: float = 0.3,
+    cache_dir: str = "cache/graphs",
 ):
-    """Build service-service edges via Pearson correlation.
-
-    For each pair of services we compute the maximum absolute correlation
-    among their metric columns and add an edge if it exceeds *threshold*.
-
-    Returns
-    -------
-    edge_index : np.ndarray, shape ``(2, E)``
-    edge_weight : np.ndarray, shape ``(E,)``
-    """
+    """Build service-service edges via causal discovery or correlation, with caching."""
     n_srv = len(service_names)
-    src_list, dst_list, weight_list = [], [], []
-
-    # Pre-compute service-level aggregated series (mean of their metrics)
+    
+    # Pre-compute service-level aggregated series
     srv_series = {}
     for svc in service_names:
         cols = service_cols[svc]
@@ -87,22 +82,54 @@ def _build_service_corr_edges(
             srv_series[svc] = anomal_df[valid].mean(axis=1).to_numpy()
         else:
             srv_series[svc] = np.zeros(len(anomal_df))
+    
+    service_level_df = pd.DataFrame(srv_series)
+    
+    key_str = "|".join(sorted(service_names)) + f"|{method}|{len(anomal_df)}"
+    cache_key = hashlib.sha256(key_str.encode()).hexdigest()[:16]
+    cache_path = os.path.join(cache_dir, f"{cache_key}.npz")
+    
+    if os.path.exists(cache_path):
+        cached = np.load(cache_path)
+        return cached["edge_index"], cached["edge_weight"]
+        
+    src_list, dst_list, weight_list = [], [], []
 
-    for i in range(n_srv):
-        for j in range(n_srv):
-            if i == j:
-                continue
-            a = srv_series[service_names[i]]
-            b = srv_series[service_names[j]]
-            std_a = np.std(a)
-            std_b = np.std(b)
-            if std_a < 1e-12 or std_b < 1e-12:
-                continue
-            corr = float(np.abs(np.corrcoef(a, b)[0, 1]))
-            if corr > threshold:
-                src_list.append(i)
-                dst_list.append(j)
-                weight_list.append(corr)
+    if method == "granger":
+        try:
+            adj_matrix = granger(service_level_df)
+            for i in range(n_srv):
+                for j in range(n_srv):
+                    if i != j and adj_matrix[i, j] > 0:
+                        # adj_matrix[i,j] means j causes i. So src=j, dst=i
+                        src_list.append(j)
+                        dst_list.append(i)
+                        weight_list.append(1.0)
+        except Exception:
+            pass # fallback to empty if fails
+    elif method == "corr":
+        corr_matrix = []
+        for i in range(n_srv):
+            for j in range(n_srv):
+                if i == j:
+                    continue
+                a = srv_series[service_names[i]]
+                b = srv_series[service_names[j]]
+                std_a, std_b = np.std(a), np.std(b)
+                if std_a < 1e-12 or std_b < 1e-12:
+                    continue
+                corr = float(np.abs(np.corrcoef(a, b)[0, 1]))
+                corr_matrix.append((i, j, corr))
+                
+        if corr_matrix:
+            # Dynamic threshold to ensure graph sparsity (Top 10% edges, or at least base threshold)
+            all_corrs = [c for _, _, c in corr_matrix]
+            dynamic_threshold = max(threshold, np.percentile(all_corrs, 90))
+            for i, j, corr in corr_matrix:
+                if corr >= dynamic_threshold:
+                    src_list.append(i)
+                    dst_list.append(j)
+                    weight_list.append(corr)
 
     if not src_list:
         # Fallback: fully-connected with uniform weight to avoid empty graph
@@ -115,6 +142,10 @@ def _build_service_corr_edges(
 
     edge_index = np.array([src_list, dst_list], dtype=np.int64)
     edge_weight = np.array(weight_list, dtype=np.float32)
+    
+    os.makedirs(cache_dir, exist_ok=True)
+    np.savez(cache_path, edge_index=edge_index, edge_weight=edge_weight)
+    
     return edge_index, edge_weight
 
 
@@ -129,6 +160,7 @@ def build_hetero_graph(
     dataset: str = None,
     sli: str = None,
     corr_threshold: float = 0.3,
+    causal_method: str = "granger",
 ) -> HeteroData:
     """Convert preprocessed DataFrames into a PyG ``HeteroData`` object.
 
@@ -152,7 +184,7 @@ def build_hetero_graph(
     """
 
     # ---- metric features ------------------------------------------------
-    metric_features = compute_deviation_features(normal_df, anomal_df, metric_cols)
+    metric_features = compute_deviation_features(normal_df, anomal_df, metric_cols, sli=sli)
     feat_dim = metric_features.shape[1]
 
     # ---- parse service / metric structure --------------------------------
@@ -184,8 +216,9 @@ def build_hetero_graph(
 
     # ---- build edges -----------------------------------------------------
     # 1. service -> service (correlation / causal)
-    ss_edge_index, ss_edge_weight = _build_service_corr_edges(
-        anomal_df, service_names, service_cols_map, threshold=corr_threshold,
+    ss_edge_index, ss_edge_weight = _build_causal_edges(
+        anomal_df, service_names, service_cols_map, 
+        method=causal_method, threshold=corr_threshold,
     )
 
     # 2. service -> metric (owns)

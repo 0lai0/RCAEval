@@ -10,6 +10,7 @@ For each iteration we:
 """
 
 import torch
+from torch.nn.utils import clip_grad_norm_
 import numpy as np
 import networkx as nx
 
@@ -104,6 +105,11 @@ def train_explainer(
 
     for epoch in range(n_epochs):
         explainer.train()
+        
+        # Dynamic annealing for Contrastive Ranking Loss (warmup over first 50% of epochs)
+        # Avoids overriding WLS early in training
+        warmup_fraction = min(1.0, epoch / max(1, n_epochs * 0.5))
+        dynamic_alpha = 0.5 * warmup_fraction
 
         for _ in range(n_samples):
             # 1. Explainer forward (full graph, no masking)
@@ -123,11 +129,12 @@ def train_explainer(
             # 4. Loss
             loss = fastshap_loss(
                 phi_hat, s, s_bar, v_0, v_1, v_s, v_s_bar,
-                prior=prior, gamma=gamma, lambda_=lambda_,
+                prior=prior, gamma=gamma, lambda_=lambda_, alpha=dynamic_alpha,
             )
 
             optimiser.zero_grad()
             loss.backward()
+            clip_grad_norm_(explainer.parameters(), max_norm=5.0)
             optimiser.step()
 
     explainer.eval()

@@ -25,6 +25,7 @@ def fastshap_loss(
     prior=None,
     gamma: float = 0.01,
     lambda_: float = 1.0,
+    alpha: float = 0.5,
 ):
     """Compute the three-part FastSHAP loss.
 
@@ -58,13 +59,29 @@ def fastshap_loss(
     # --- Efficiency Penalty ----------------------------------------------
     l_eff = (v_1 - v_0 - phi_hat.sum()) ** 2
 
-    # --- Asymmetric RCA Loss ---------------------------------------------
+    # --- Asymmetric RCA Loss & Contrastive Ranking Loss ------------------
     if prior is not None:
         # Low-prior nodes get penalised more: weight = (1 - prior[i])
         weight = 1.0 - prior
         l_asym = (weight * phi_hat ** 2).sum()
+        
+        # Contrastive Ranking Loss: Push high-prior nodes' phi above low-prior nodes
+        _, indices = torch.sort(prior, descending=True)
+        # Define Top-K as potential root causes
+        n_top = max(1, min(5, len(prior) // 2))
+        top_idx = indices[:n_top]
+        bottom_idx = indices[n_top:]
+        if len(bottom_idx) > 0:
+            phi_top = phi_hat[top_idx].unsqueeze(1) # (n_top, 1)
+            phi_bottom = phi_hat[bottom_idx].unsqueeze(0) # (1, n_bottom)
+            # Margin ranking loss: ReLU(margin - (phi_top - phi_bottom))
+            margin = 0.1
+            l_rank = F.relu(margin - (phi_top - phi_bottom)).mean()
+        else:
+            l_rank = torch.tensor(0.0, device=phi_hat.device)
     else:
         l_asym = torch.tensor(0.0, device=phi_hat.device)
+        l_rank = torch.tensor(0.0, device=phi_hat.device)
 
-    loss = l_wls + gamma * l_eff + lambda_ * l_asym
+    loss = l_wls + gamma * l_eff + lambda_ * l_asym + alpha * l_rank
     return loss
