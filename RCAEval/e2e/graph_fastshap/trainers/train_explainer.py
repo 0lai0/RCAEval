@@ -20,9 +20,10 @@ from .custom_loss import fastshap_loss
 def _compute_prior(hetero_data):
     """Compute a graph-based prior for each metric node.
 
-    We build a simple directed graph of services from the ``calls`` edges,
-    compute PageRank, and assign each metric node its parent-service PageRank
-    score.  This gives upstream services a higher prior.
+    We build the **reverse** call graph G_call^rev from the ``calls`` edges
+    and compute PageRank on it.  In the reverse graph, upstream (root-cause)
+    services receive more in-edges from their downstream dependents, yielding
+    higher PageRank scores — consistent with fault-origin prioritisation.
 
     Returns
     -------
@@ -40,7 +41,8 @@ def _compute_prior(hetero_data):
         ei = hetero_data[ss_key].edge_index
         for k in range(ei.shape[1]):
             src, dst = int(ei[0, k]), int(ei[1, k])
-            G.add_edge(src, dst)
+            # Reverse edge: effect→cause, so upstream gets higher PageRank
+            G.add_edge(dst, src)
 
     pr = nx.pagerank(G, alpha=0.85)
 

@@ -75,6 +75,11 @@ class ExplainerGNN(nn.Module):
         # Final linear head: metric node embeddings -> scalar phi per node
         # NO activation -- Shapley values can be positive or negative
         self.phi_head = nn.Linear(hidden_dim, 1)
+        # Shapley values should sum to v(1)-v(0) ∈ [-1,1].
+        # Scale down init so initial Σφ ≈ 0, not ±N/10.
+        with torch.no_grad():
+            self.phi_head.weight.mul_(0.01)
+            self.phi_head.bias.zero_()
 
     def forward(self, hetero_data):
         """Compute per-metric Shapley values.

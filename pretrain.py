@@ -32,7 +32,7 @@ def pretrain(dataset_name="online-boutique", surrogate_epochs=100, explainer_epo
     surrogate = SurrogateGNN(in_dim=feat_dim, hidden_dim=64, n_layers=3).to(device)
     surr_opt = torch.optim.Adam(surrogate.parameters(), lr=1e-3, weight_decay=1e-5)
     surr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        surr_opt, mode='min', factor=0.5, patience=5, min_lr=1e-6
+        surr_opt, mode='min', factor=0.5, patience=10, min_lr=1e-6
     )
     best_surr_loss = float("inf")
     best_surr_state = None
@@ -102,8 +102,8 @@ def pretrain(dataset_name="online-boutique", surrogate_epochs=100, explainer_epo
     
     explainer = ExplainerGNN(in_dim=feat_dim, hidden_dim=64, n_layers=3).to(device)
     expl_opt = torch.optim.Adam(explainer.parameters(), lr=1e-3, weight_decay=1e-5)
-    expl_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        expl_opt, mode='min', factor=0.5, patience=5, min_lr=1e-6
+    expl_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        expl_opt, T_0=20, T_mult=2, eta_min=1e-6
     )
     best_expl_loss = float("inf")
     best_expl_state = None
@@ -145,7 +145,7 @@ def pretrain(dataset_name="online-boutique", surrogate_epochs=100, explainer_epo
                 epoch_loss += loss.item()
                 
         avg_loss = epoch_loss / len(data_list)
-        expl_scheduler.step(avg_loss)
+        expl_scheduler.step()
         current_lr = expl_opt.param_groups[0]['lr']
         if avg_loss < best_expl_loss:
             best_expl_loss = avg_loss

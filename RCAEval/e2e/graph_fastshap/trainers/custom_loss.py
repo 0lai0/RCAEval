@@ -49,21 +49,29 @@ def fastshap_loss(
     loss : Tensor (scalar)
     """
 
+    # --- Scale for Relative Error ----------------------------------------
+    # Detach to prevent Explainer from gaming the denominator.
+    # Use + 1e-3 (not 1e-8) to avoid secondary explosions when v(1) ≈ v(0).
+    scale = ((v_1 - v_0).abs() + 1e-3).detach()
+
     # --- WLS (Weighted Least Squares) ------------------------------------
     # v(s)     approx = v(0) + s . phi
     # v(s_bar) approx = v(0) + s_bar . phi
     pred_s = v_0 + torch.dot(s, phi_hat)
     pred_s_bar = v_0 + torch.dot(s_bar, phi_hat)
-    l_wls = (v_s - pred_s) ** 2 + (v_s_bar - pred_s_bar) ** 2
+    l_wls = ((v_s - pred_s) / scale) ** 2 + ((v_s_bar - pred_s_bar) / scale) ** 2
 
     # --- Efficiency Penalty ----------------------------------------------
-    l_eff = (v_1 - v_0 - phi_hat.sum()) ** 2
+    l_eff = ((v_1 - v_0 - phi_hat.sum()) / scale) ** 2
 
     # --- Asymmetric RCA Loss & Contrastive Ranking Loss ------------------
+    n_met = len(phi_hat)
+    BASELINE_N = 50.0  # Baseline node count to preserve penalty strength on small graphs
+
     if prior is not None:
         # Low-prior nodes get penalised more: weight = (1 - prior[i])
         weight = 1.0 - prior
-        l_asym = (weight * phi_hat ** 2).sum()
+        l_asym = (weight * phi_hat ** 2).sum() / n_met * BASELINE_N
         
         # Contrastive Ranking Loss: Push high-prior nodes' phi above low-prior nodes
         _, indices = torch.sort(prior, descending=True)
