@@ -28,12 +28,19 @@ from RCAEval.graph_construction.granger import granger
 # Service name extraction
 # ---------------------------------------------------------------------------
 
+# Known multi-token metric suffixes, ordered longest-first for greedy match.
+_KNOWN_SUFFIXES = [
+    "lat_50", "lat_90", "lat_99", "lat_mean",
+    "cpu", "mem", "latency", "load", "error",
+    "diskio", "socket", "requests",
+]
+
+
 def _extract_service_name(col_name: str) -> str:
     """Extract the service name from a ``{service}_{metric_type}`` column.
 
-    The convention used across RCAEval datasets is that the *last* ``_``-
-    separated token is the metric type (cpu, mem, latency, load, error, ...).
-    Everything before that token is the service name.
+    Tries known multi-token suffixes first (e.g. ``lat_90``), then falls
+    back to splitting on the last ``_``.
 
     Examples
     --------
@@ -42,8 +49,13 @@ def _extract_service_name(col_name: str) -> str:
     >>> _extract_service_name("ts-ui-dashboard_latency")
     'ts-ui-dashboard'
     >>> _extract_service_name("front-end_lat_90")
-    'front-end_lat'
+    'front-end'
     """
+    for suffix in _KNOWN_SUFFIXES:
+        tag = "_" + suffix
+        if col_name.endswith(tag):
+            return col_name[: -len(tag)]
+    # Fallback: last underscore-separated token
     parts = col_name.rsplit("_", 1)
     if len(parts) == 2:
         return parts[0]
@@ -52,6 +64,10 @@ def _extract_service_name(col_name: str) -> str:
 
 def _extract_metric_type(col_name: str) -> str:
     """Return the metric-type suffix of a column name."""
+    for suffix in _KNOWN_SUFFIXES:
+        tag = "_" + suffix
+        if col_name.endswith(tag):
+            return suffix
     parts = col_name.rsplit("_", 1)
     if len(parts) == 2:
         return parts[1]
@@ -85,7 +101,11 @@ def _build_causal_edges(
     
     service_level_df = pd.DataFrame(srv_series)
     
-    key_str = "|".join(sorted(service_names)) + f"|{method}|{len(anomal_df)}"
+    # Include a hash of the actual time-series values so that different
+    # failure cases sharing the same service set / window length are NOT
+    # silently served from the same cached graph (reviewer #2 bug report).
+    data_hash = hashlib.sha256(anomal_df.to_numpy().tobytes()).hexdigest()[:8]
+    key_str = "|".join(sorted(service_names)) + f"|{method}|{len(anomal_df)}|{data_hash}"
     cache_key = hashlib.sha256(key_str.encode()).hexdigest()[:16]
     cache_path = os.path.join(cache_dir, f"{cache_key}.npz")
     

@@ -1,5 +1,7 @@
 import os
+import random
 import argparse
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -11,16 +13,28 @@ from RCAEval.e2e.graph_fastshap.models.explainer_gnn import ExplainerGNN
 from RCAEval.e2e.graph_fastshap.trainers.train_explainer import _compute_prior
 from RCAEval.e2e.graph_fastshap.trainers.custom_loss import fastshap_loss
 
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility across all libraries."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def _compute_soft_label_fast(deviations, s):
     # Vectorized fast soft label directly entirely in PyTorch
     masked_devs = deviations * s
     full_dev_sum = deviations.sum() + 1e-8
     return float((masked_devs.sum() / full_dev_sum).item())
 
-def pretrain(dataset_name="online-boutique", surrogate_epochs=100, explainer_epochs=150, n_samples=16):
+def pretrain(dataset_name="online-boutique", surrogate_epochs=200, explainer_epochs=300, n_samples=16, seed=42):
+    set_seed(seed)
     # Force CPU for pre-training because small ~20-node graphs bottleneck hard on CUDA kernel launches
     device = "cpu"
-    print(f"Using device: {device}")
+    print(f"Using device: {device} | seed: {seed}")
     
     data_list = load_graph_dataset(dataset_name=dataset_name)
     if not data_list:
@@ -167,7 +181,13 @@ def pretrain(dataset_name="online-boutique", surrogate_epochs=100, explainer_epo
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="online-boutique")
-    parser.add_argument("--surr-epochs", type=int, default=100)
-    parser.add_argument("--expl-epochs", type=int, default=150)
+    parser.add_argument("--surr-epochs", type=int, default=200)
+    parser.add_argument("--expl-epochs", type=int, default=300)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    pretrain(dataset_name=args.dataset, surrogate_epochs=args.surr_epochs, explainer_epochs=args.expl_epochs)
+    pretrain(
+        dataset_name=args.dataset,
+        surrogate_epochs=args.surr_epochs,
+        explainer_epochs=args.expl_epochs,
+        seed=args.seed,
+    )

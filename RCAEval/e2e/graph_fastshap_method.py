@@ -59,6 +59,11 @@ def graph_fastshap(
     # ==================================================================
     # 1. Preprocessing + split
     # ==================================================================
+    # Reproducible inference
+    seed = int(os.environ.get("GFS_SEED", 42))
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
     if inject_time is not None and "time" in data.columns:
         normal_df = data[data["time"] < inject_time]
         anomal_df = data[data["time"] >= inject_time]
@@ -124,10 +129,19 @@ def graph_fastshap(
     
     # ==================================================================
     # 5. Local Adaptation / Online Fine-Tuning
+    #    Adaptive threshold: skip adaptation for large-scale systems
+    #    where ablation shows it hurts performance (reviewer #2/#5).
     # ==================================================================
     ft_surr_epochs = int(os.environ.get("GFS_FT_SURR_EPOCHS", 5))
     ft_expl_epochs = int(os.environ.get("GFS_FT_EXPL_EPOCHS", 5))
-    
+    adapt_threshold = int(os.environ.get("GFS_ADAPT_THRESHOLD", 100))
+
+    n_metrics = hetero_data["metric"].x.shape[0]
+    if n_metrics > adapt_threshold:
+        # Large-scale system: ablation shows local adaptation hurts (RE1-TT)
+        ft_surr_epochs = 0
+        ft_expl_epochs = 0
+
     if ft_surr_epochs > 0:
         surrogate = train_surrogate(
             surrogate, hetero_data,
@@ -162,8 +176,9 @@ def graph_fastshap(
     phi_norm = (phi_numpy - phi_numpy.min()) / (phi_numpy.max() - phi_numpy.min() + 1e-8)
     dev_norm = (dev_scores - dev_scores.min()) / (dev_scores.max() - dev_scores.min() + 1e-8)
 
-    # 70% Explainer SHAP + 30% Statistical Deviation
-    ensemble_phi = 0.7 * phi_norm + 0.3 * dev_norm
+    # Configurable ensemble weight (α=0 → pure deviation, α=1 → pure Shapley)
+    alpha_shap = float(os.environ.get("GFS_ALPHA_SHAP", 0.7))
+    ensemble_phi = alpha_shap * phi_norm + (1 - alpha_shap) * dev_norm
 
     ranks = phi_to_ranks(ensemble_phi, metric_cols)
 
