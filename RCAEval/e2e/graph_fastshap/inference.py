@@ -21,7 +21,8 @@ def phi_to_ranks(phi_hat, metric_cols):
     """
     scores = {}
     for i, col in enumerate(metric_cols):
-        scores[col] = phi_hat[i].item()
+        val = phi_hat[i]
+        scores[col] = val.item() if hasattr(val, 'item') else float(val)
 
     # Positive phi first, sorted descending
     positive = [(c, v) for c, v in scores.items() if v > 0]

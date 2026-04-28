@@ -21,7 +21,15 @@ import torch
 from torch_geometric.data import HeteroData
 
 from .feature_engineer import compute_deviation_features
-from RCAEval.graph_construction.granger import granger
+from RCAEval.graph_construction.hetRCA_granger import granger
+
+GRAPH_BUILD_CONFIG = {
+    "apply_fdr": os.environ.get("GRANGER_FDR", "1") == "1",
+    "preprocess_stationarity": os.environ.get("GRANGER_ADF", "1") == "1",
+    "fallback": os.environ.get("GRANGER_FALLBACK", "pearson"),
+    "version": os.environ.get("GRAPH_BUILD_VERSION", "v2_bh_fdr"),
+    "pearson_top_percentile": float(os.environ.get("PEARSON_TOP_PERCENTILE", "90")),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -105,19 +113,69 @@ def _build_causal_edges(
     # failure cases sharing the same service set / window length are NOT
     # silently served from the same cached graph (reviewer #2 bug report).
     data_hash = hashlib.sha256(anomal_df.to_numpy().tobytes()).hexdigest()[:8]
-    key_str = "|".join(sorted(service_names)) + f"|{method}|{len(anomal_df)}|{data_hash}"
+    key_str = (
+        "|".join(sorted(service_names))
+        + f"|{method}|{len(anomal_df)}|{data_hash}"
+        + f"|{GRAPH_BUILD_CONFIG['version']}"
+        + f"|fdr={int(GRAPH_BUILD_CONFIG['apply_fdr'])}"
+        + f"|adf={int(GRAPH_BUILD_CONFIG['preprocess_stationarity'])}"
+        + f"|fb={GRAPH_BUILD_CONFIG['fallback']}"
+    )
     cache_key = hashlib.sha256(key_str.encode()).hexdigest()[:16]
     cache_path = os.path.join(cache_dir, f"{cache_key}.npz")
     
     if os.path.exists(cache_path):
-        cached = np.load(cache_path)
-        return cached["edge_index"], cached["edge_weight"]
+        cached = np.load(cache_path, allow_pickle=True)
+        build_stats = {}
+        if "build_stats" in cached.files:
+            build_stats = cached["build_stats"].item()
+        return cached["edge_index"], cached["edge_weight"], build_stats
         
     src_list, dst_list, weight_list = [], [], []
+    build_stats = {
+        "n_granger": 0,
+        "n_pearson_fallback": 0,
+        "fallback_triggered": False,
+        "granger_detail": {},
+        "fallback_mode": GRAPH_BUILD_CONFIG["fallback"],
+    }
+
+    def _pearson_top_edges():
+        corr_pairs = []
+        for i in range(n_srv):
+            for j in range(n_srv):
+                if i == j:
+                    continue
+                a = srv_series[service_names[i]]
+                b = srv_series[service_names[j]]
+                std_a, std_b = np.std(a), np.std(b)
+                if std_a < 1e-12 or std_b < 1e-12:
+                    continue
+                corr = float(np.abs(np.corrcoef(a, b)[0, 1]))
+                corr_pairs.append((i, j, corr))
+
+        if not corr_pairs:
+            return [], [], []
+
+        all_corrs = [c for _, _, c in corr_pairs]
+        cutoff = np.percentile(all_corrs, GRAPH_BUILD_CONFIG["pearson_top_percentile"])
+        p_src, p_dst, p_w = [], [], []
+        for i, j, corr in corr_pairs:
+            if corr >= cutoff:
+                p_src.append(i)
+                p_dst.append(j)
+                p_w.append(corr)
+        return p_src, p_dst, p_w
 
     if method == "granger":
         try:
-            adj_matrix = granger(service_level_df)
+            adj_matrix, granger_stats = granger(
+                service_level_df,
+                apply_fdr=GRAPH_BUILD_CONFIG["apply_fdr"],
+                preprocess_stationarity=GRAPH_BUILD_CONFIG["preprocess_stationarity"],
+                return_stats=True,
+            )
+            build_stats["granger_detail"] = granger_stats
             for i in range(n_srv):
                 for j in range(n_srv):
                     if i != j and adj_matrix[i, j] > 0:
@@ -125,8 +183,9 @@ def _build_causal_edges(
                         src_list.append(j)
                         dst_list.append(i)
                         weight_list.append(1.0)
-        except Exception:
-            pass # fallback to empty if fails
+            build_stats["n_granger"] = len(src_list)
+        except Exception as exc:
+            build_stats["granger_detail"] = {"error": str(exc)}
     elif method == "corr":
         corr_matrix = []
         for i in range(n_srv):
@@ -151,22 +210,43 @@ def _build_causal_edges(
                     dst_list.append(j)
                     weight_list.append(corr)
 
+    min_granger_edges = max(n_srv - 1, 1)
+    if method == "granger" and len(src_list) < min_granger_edges:
+        build_stats["fallback_triggered"] = True
+        if GRAPH_BUILD_CONFIG["fallback"] == "pearson":
+            p_src, p_dst, p_w = _pearson_top_edges()
+            src_list.extend(p_src)
+            dst_list.extend(p_dst)
+            weight_list.extend(p_w)
+            build_stats["n_pearson_fallback"] = len(p_src)
+        elif GRAPH_BUILD_CONFIG["fallback"] == "full":
+            for i in range(n_srv):
+                for j in range(n_srv):
+                    if i != j:
+                        src_list.append(i)
+                        dst_list.append(j)
+                        weight_list.append(1.0 / max(n_srv - 1, 1))
+            build_stats["n_pearson_fallback"] = 0
+
     if not src_list:
-        # Fallback: fully-connected with uniform weight to avoid empty graph
-        for i in range(n_srv):
-            for j in range(n_srv):
-                if i != j:
-                    src_list.append(i)
-                    dst_list.append(j)
-                    weight_list.append(1.0 / max(n_srv - 1, 1))
+        # Final safe fallback: star-like spanning structure
+        for i in range(1, n_srv):
+            src_list.append(0)
+            dst_list.append(i)
+            weight_list.append(1.0 / max(n_srv, 1))
 
     edge_index = np.array([src_list, dst_list], dtype=np.int64)
     edge_weight = np.array(weight_list, dtype=np.float32)
     
     os.makedirs(cache_dir, exist_ok=True)
-    np.savez(cache_path, edge_index=edge_index, edge_weight=edge_weight)
+    np.savez(
+        cache_path,
+        edge_index=edge_index,
+        edge_weight=edge_weight,
+        build_stats=np.array(build_stats, dtype=object),
+    )
     
-    return edge_index, edge_weight
+    return edge_index, edge_weight, build_stats
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +261,7 @@ def build_hetero_graph(
     sli: str = None,
     corr_threshold: float = 0.3,
     causal_method: str = "granger",
+    return_stats: bool = False,
 ) -> HeteroData:
     """Convert preprocessed DataFrames into a PyG ``HeteroData`` object.
 
@@ -236,7 +317,7 @@ def build_hetero_graph(
 
     # ---- build edges -----------------------------------------------------
     # 1. service -> service (correlation / causal)
-    ss_edge_index, ss_edge_weight = _build_causal_edges(
+    ss_edge_index, ss_edge_weight, build_stats = _build_causal_edges(
         anomal_df, service_names, service_cols_map, 
         method=causal_method, threshold=corr_threshold,
     )
@@ -282,4 +363,6 @@ def build_hetero_graph(
     data.sli_col = sli
     data.sli_idx = metric_cols.index(sli) if (sli and sli in metric_cols) else -1
 
+    if return_stats:
+        return data, build_stats
     return data

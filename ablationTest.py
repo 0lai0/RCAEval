@@ -34,7 +34,7 @@ from RCAEval.utility import (
 )
 
 from RCAEval.e2e import graph_fastshap
-
+from RCAEval.e2e.graph_fastshap_ablation_method import graph_fastshap_ablation
 if is_py310():
     from RCAEval.e2e import (
         baro,
@@ -110,7 +110,6 @@ def parse_args():
         ],
         help="Choose feature extraction method for gnn_kan_rca (e.g., rca_aware)"
     )
-    parser.add_argument("--output_dir", type=str, default="output", help="Output directory to save results")
     args = parser.parse_args()
 
     # Check if method is available (including GNN+KAN)
@@ -122,7 +121,8 @@ def parse_args():
             "granger_pagerank", "granger_randomwalk", "lingam_pagerank", "lingam_randomwalk",
             "micro_diag", "microcause", "microrank", "mscred", "nsigma", "ntlr_pagerank",
             "ntlr_randomwalk", "pc_pagerank", "pc_randomwalk", "run", "tracerca",
-            "graph_fastshap"
+            "graph_fastshap",
+            "ablation-no-causal", "ablation-no-eff", "ablation-no-rank", "ablation-no-adapt", "baseline-random"
         ]
         if gnn_kan_rca is not None:
             available_methods.append("gnn_kan_rca")
@@ -196,7 +196,7 @@ if args.test is True:
 # prepare output paths
 from tempfile import TemporaryDirectory
 # output_path = TemporaryDirectory().name
-output_path = args.output_dir
+output_path = "output"
 report_path = join(output_path, f"report.xlsx")
 result_path = join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
@@ -281,7 +281,15 @@ def process(data_path):
         raise ValueError("SLI not implemented")
 
     # == PROCESS ==
-    func = globals()[args.method]
+    variant = ""
+    if args.method.startswith("ablation-") or args.method.startswith("baseline-"):
+        func = graph_fastshap_ablation
+        if args.method.startswith("ablation-"):
+            variant = args.method.split("-", 1)[1]
+        elif args.method.startswith("baseline-"):
+            variant = args.method
+    else:
+        func = globals()[args.method]
 
     try:
         st = datetime.now()
@@ -321,18 +329,27 @@ def process(data_path):
                 verbose=True
             )
         else:
-            # Standard method execution
-            out = func(
-                data,
-                inject_time,
-                dataset=args.dataset,
-                anomalies=None,
-                dk_select_useful=False,
-                sli=sli,
-                verbose=False,
-                n_iter=num_node,
-                args=run_args,
-            )
+            if args.method.startswith("ablation-") or args.method.startswith("baseline-"):
+                out = func(
+                    data,
+                    inject_time,
+                    dataset=args.dataset,
+                    sli=sli,
+                    variant=variant
+                )
+            else:
+                # Standard method execution
+                out = func(
+                    data,
+                    inject_time,
+                    dataset=args.dataset,
+                    anomalies=None,
+                    dk_select_useful=False,
+                    sli=sli,
+                    verbose=False,
+                    n_iter=num_node,
+                    args=run_args,
+                )
         
         root_causes = out.get("ranks")
         # print("==============")

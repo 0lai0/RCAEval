@@ -1,3 +1,4 @@
+import json
 import os
 import glob
 import torch
@@ -60,6 +61,7 @@ def load_graph_dataset(dataset_name="online-boutique", root_dir=".", length=20, 
         "re3-ob": "data/RE3/RE3-OB",
         "re3-ss": "data/RE3/RE3-SS",
         "re3-tt": "data/RE3/RE3-TT",
+        "deathstarbench": "data/deathstarbench",
     }
     
     if dataset_name in DATASET_MAP:
@@ -69,25 +71,47 @@ def load_graph_dataset(dataset_name="online-boutique", root_dir=".", length=20, 
     data_paths = sorted(list(glob.glob(os.path.join(dataset_path, "**/data.csv"), recursive=True)))
     if not data_paths:
         data_paths = sorted(list(glob.glob(os.path.join(dataset_path, "**/simple_metrics.csv"), recursive=True)))
-    
+    if dataset_name == "deathstarbench" or "deathstarbench" in dataset_path.replace("\\", "/"):
+        extra = glob.glob(os.path.join(dataset_path, "**/metrics.csv"), recursive=True)
+        data_paths = sorted(set(data_paths) | set(extra))
+
     data_list = []
-    
+    graph_stats_log = []
+
     for i, data_path in enumerate(data_paths):
         data_dir = os.path.dirname(data_path)
-        service = os.path.basename(os.path.dirname(os.path.dirname(data_path))).split("_")[0]
-        case_name = os.path.basename(os.path.dirname(data_path))
-        
+        norm_path = data_path.replace("\\", "/")
+        info_path = os.path.join(data_dir, "info.json")
+        is_dsb = "deathstarbench" in norm_path and os.path.basename(data_path) == "metrics.csv"
+
+        if is_dsb and os.path.isfile(info_path):
+            with open(info_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            service = meta.get("root_cause", os.path.basename(data_dir))
+            case_name = os.path.basename(data_dir)
+        else:
+            service = os.path.basename(os.path.dirname(os.path.dirname(data_path))).split("_")[0]
+            case_name = os.path.basename(os.path.dirname(data_path))
+
         data = pd.read_csv(data_path)
         data = data.loc[:, ~data.columns.str.endswith("_latency-50")]
         data = data.replace([float("inf"), float("-inf")], float("nan"))
         data = data.fillna(method="ffill").fillna(0)
-        
+
         sli = get_sli(data_path, data, service)
-        
+
         inject_time_path = os.path.join(data_dir, "inject_time.txt")
         if os.path.exists(inject_time_path):
             with open(inject_time_path) as f:
                 inject_time = int(f.readlines()[0].strip())
+        elif os.path.isfile(info_path):
+            with open(info_path, encoding="utf-8") as f:
+                meta_inj = json.load(f)
+            if "inject_time" in meta_inj:
+                inject_time = int(pd.Timestamp(meta_inj["inject_time"]).timestamp())
+            else:
+                mid = len(data) // 2
+                inject_time = data.iloc[mid]["time"] if "time" in data.columns else 0
         else:
             mid = len(data) // 2
             inject_time = data.iloc[mid]["time"] if "time" in data.columns else 0
@@ -110,7 +134,14 @@ def load_graph_dataset(dataset_name="online-boutique", root_dir=".", length=20, 
         anomal_df = anomal_df[intersects]
         
         # Build causal graph
-        hetero_data = build_hetero_graph(normal_df, anomal_df, metric_cols, dataset=dataset_name, sli=sli)
+        hetero_data, build_stats = build_hetero_graph(
+            normal_df,
+            anomal_df,
+            metric_cols,
+            dataset=dataset_name,
+            sli=sli,
+            return_stats=True,
+        )
         
         # Pre-calculate deviations for fast soft-label during training
         normal_vals = normal_df[metric_cols].to_numpy(dtype=np.float64)
@@ -130,9 +161,23 @@ def load_graph_dataset(dataset_name="online-boutique", root_dir=".", length=20, 
         hetero_data.metric_cols = metric_cols # Used for inference ranking mapping
         
         data_list.append(hetero_data)
+        graph_stats_log.append(
+            {
+                "dataset": dataset_name,
+                "case": f"{service}_{case_name}",
+                "n_granger": int(build_stats.get("n_granger", 0)),
+                "n_pearson_fallback": int(build_stats.get("n_pearson_fallback", 0)),
+                "fallback_triggered": bool(build_stats.get("fallback_triggered", False)),
+                "fallback_mode": build_stats.get("fallback_mode", "unknown"),
+            }
+        )
         if (i+1) % 10 == 0:
             print(f"Processed {i+1}/{len(data_paths)} cases")
             
     print(f"Saving {len(data_list)} graphs to {cache_path}")
     torch.save(data_list, cache_path)
+    if graph_stats_log:
+        stats_path = os.path.join(cache_dir, f"graph_stats_{dataset_name}.csv")
+        pd.DataFrame(graph_stats_log).to_csv(stats_path, index=False)
+        print(f"Saved graph construction stats to {stats_path}")
     return data_list

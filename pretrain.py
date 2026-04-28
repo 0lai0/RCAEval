@@ -14,6 +14,21 @@ from RCAEval.e2e.graph_fastshap.trainers.train_explainer import _compute_prior
 from RCAEval.e2e.graph_fastshap.trainers.custom_loss import fastshap_loss
 
 
+def resolve_device(requested_device: str | None = None) -> str:
+    """Resolve runtime device with safe fallback."""
+    if requested_device:
+        dev = requested_device.strip().lower()
+    else:
+        dev = os.environ.get("GFS_DEVICE", "auto").strip().lower()
+
+    if dev == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if dev.startswith("cuda") and not torch.cuda.is_available():
+        print(f"Requested device '{dev}' but CUDA is unavailable; fallback to CPU.")
+        return "cpu"
+    return dev
+
+
 def set_seed(seed: int):
     """Set random seed for reproducibility across all libraries."""
     random.seed(seed)
@@ -30,10 +45,17 @@ def _compute_soft_label_fast(deviations, s):
     full_dev_sum = deviations.sum() + 1e-8
     return float((masked_devs.sum() / full_dev_sum).item())
 
-def pretrain(dataset_name="online-boutique", surrogate_epochs=200, explainer_epochs=300, n_samples=16, seed=42):
+def pretrain(
+    dataset_name="online-boutique",
+    surrogate_epochs=100,
+    explainer_epochs=150,
+    n_samples=16,
+    seed=42,
+    checkpoint_dir=None,
+    device=None,
+):
     set_seed(seed)
-    # Force CPU for pre-training because small ~20-node graphs bottleneck hard on CUDA kernel launches
-    device = "cpu"
+    device = resolve_device(device)
     print(f"Using device: {device} | seed: {seed}")
     
     data_list = load_graph_dataset(dataset_name=dataset_name)
@@ -171,9 +193,10 @@ def pretrain(dataset_name="online-boutique", surrogate_epochs=200, explainer_epo
         explainer.load_state_dict(best_expl_state)
         print(f"Restored best explainer (Loss: {best_expl_loss:.4f})")
 
-    os.makedirs("checkpoints", exist_ok=True)
-    surr_path = f"checkpoints/{dataset_name}_surrogate.pt"
-    expl_path = f"checkpoints/{dataset_name}_explainer.pt"
+    ckpt_dir = checkpoint_dir or os.environ.get("GFS_CHECKPOINT_DIR", "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    surr_path = os.path.join(ckpt_dir, f"{dataset_name}_surrogate.pt")
+    expl_path = os.path.join(ckpt_dir, f"{dataset_name}_explainer.pt")
     torch.save(surrogate.state_dict(), surr_path)
     torch.save(explainer.state_dict(), expl_path)
     print(f"Pre-training complete! Models saved to {surr_path} and {expl_path}")
@@ -184,10 +207,26 @@ if __name__ == "__main__":
     parser.add_argument("--surr-epochs", type=int, default=200)
     parser.add_argument("--expl-epochs", type=int, default=300)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="Directory for *_surrogate.pt / *_explainer.pt (default: env GFS_CHECKPOINT_DIR or ./checkpoints). "
+        "Use a separate folder to avoid mixing with other experiments.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to run training on (e.g., cpu, cuda, cuda:0). "
+        "Default uses env GFS_DEVICE or auto-detects CUDA.",
+    )
     args = parser.parse_args()
     pretrain(
         dataset_name=args.dataset,
         surrogate_epochs=args.surr_epochs,
         explainer_epochs=args.expl_epochs,
         seed=args.seed,
+        checkpoint_dir=args.checkpoint_dir,
+        device=args.device,
     )
