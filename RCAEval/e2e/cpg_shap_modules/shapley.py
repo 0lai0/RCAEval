@@ -4,7 +4,7 @@ import numpy as np
 from joblib import Parallel, delayed
 import logging
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 from .propagation import propagate_k_steps
 
 logger = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ def normalize_shapley(shapley_values: Dict[str, float]) -> Dict[str, float]:
     return {k: float((v - vmin) / (vmax - vmin)) for k, v in shapley_values.items()}
 
 
-def compute_shapley_values(local_nodes: List[str], edge_weights: Dict[Tuple[str, str], float], node_init: Dict[str, float], cfg: PCMCIShapleyConfig) -> Dict[str, float]:
+def compute_shapley_values(local_nodes: List[str], edge_weights: Dict[Tuple[str, str], float], node_init: Dict[str, float], cfg: CPGShapConfig) -> Dict[str, float]:
     """
     Compute Shapley values with caching optimizations.
     """
@@ -202,7 +202,7 @@ def compute_shapley_values(local_nodes: List[str], edge_weights: Dict[Tuple[str,
 def compute_adaptive_shapley_sampling(
     local_nodes: List[str], 
     value_func: Callable[[Set[str]], float], 
-    cfg: PCMCIShapleyConfig
+    cfg: CPGShapConfig
 ) -> Dict[str, float]:
     """
     Adaptive Shapley sampling: automatically adjust the number of samples based on variance,

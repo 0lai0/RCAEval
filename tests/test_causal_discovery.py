@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from RCAEval.e2e.pcmci_shapley_modules import causal_discovery, PCMCIShapleyConfig
+from RCAEval.e2e.cpg_shap_modules import causal_discovery, CPGShapConfig
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def sample_data():
 @pytest.fixture
 def config():
     """Create default configuration."""
-    return PCMCIShapleyConfig(
+    return CPGShapConfig(
         causal_method="pcmci",
         pcmci_alpha=0.05,
         tau_max=5,
@@ -229,12 +229,12 @@ def test_extract_edges_pc():
 def test_config_validation():
     """Test configuration validation."""
     # Valid config
-    config = PCMCIShapleyConfig(causal_method="pcmci")
+    config = CPGShapConfig(causal_method="pcmci")
     assert config.validate()
     
     # Invalid method
     with pytest.raises(AssertionError):
-        config = PCMCIShapleyConfig(causal_method="invalid_method")
+        config = CPGShapConfig(causal_method="invalid_method")
         config.validate()
 
 

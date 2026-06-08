@@ -7,7 +7,7 @@ from tigramite import data_processing
 from tigramite.independence_tests.parcorr import ParCorr
 from tigramite.pcmci import PCMCI
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 from .utils import smart_fillna_matrix
 
 
@@ -160,7 +160,7 @@ def compute_edge_strength(report: Dict[str, Any], edges: List[Tuple[int, int, in
     return strengths
 
 
-def local_pcmci_causal_test(data: pd.DataFrame, local_nodes: List[str], config: PCMCIShapleyConfig) -> Dict[str, Any]:
+def local_pcmci_causal_test(data: pd.DataFrame, local_nodes: List[str], config: CPGShapConfig) -> Dict[str, Any]:
     X, cols = build_timeseries_matrix(data, local_nodes, use_pca=config.use_pca, pca_components=config.pca_components)
     report = run_pcmci_plus(
         X, 

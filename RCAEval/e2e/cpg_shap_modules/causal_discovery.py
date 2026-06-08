@@ -12,7 +12,7 @@ from tigramite import data_processing
 from tigramite.independence_tests.parcorr import ParCorr
 from tigramite.pcmci import PCMCI
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 from .utils import smart_fillna_matrix
 
 
@@ -314,7 +314,7 @@ def extract_edges_and_strengths(
 def discover_causal_graph(
     data: pd.DataFrame,
     local_nodes: List[str],
-    config: PCMCIShapleyConfig,
+    config: CPGShapConfig,
     method: CausalMethod = "pcmci"
 ) -> Dict[str, Any]:
     """

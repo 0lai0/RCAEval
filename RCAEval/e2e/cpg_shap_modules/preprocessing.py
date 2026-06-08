@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Any
 import pandas as pd
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 from .utils import robust_standardize, robust_standardize_with_interpolation
 
 
@@ -59,7 +59,7 @@ def aggregate_node_anomaly(anomaly_df: pd.DataFrame, metric_map: Dict[str, list]
     return pd.Series(scores)
 
 
-def preprocess_data(data: pd.DataFrame, config: PCMCIShapleyConfig) -> Dict[str, Any]:
+def preprocess_data(data: pd.DataFrame, config: CPGShapConfig) -> Dict[str, Any]:
     """
     End-to-end preprocessing pipeline producing normalized data and anomaly scores.
     Now includes intelligent missing value handling.

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class PCMCIShapleyConfig:
+class CPGShapConfig:
     # Node Isolation
     tau_max: int = 5
     top_m1: int = 60

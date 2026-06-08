@@ -1,10 +1,10 @@
-# PCMCI-Shapley Modules
+# CPG-Shap Modules
 
 This package implements the Local PCMCI-lag Causal + Shapley Propagation method.
 
 - preprocessing.py: robust normalization, anomaly scoring, aggregation
 - node_isolation.py: lagged correlation, isolation forest, trace augmentation
-- pcmci_local.py: PCMCI+ wrapper and edge extraction
+- cpg_shap_local.py: PCMCI+ wrapper and edge extraction
 - edge_fusion.py: fuse trace/PCMCI/isolation and normalize
 - propagation.py: K-step anomaly propagation
 - shapley.py: coalition value and sampling-based Shapley
@@ -14,16 +14,16 @@ This package implements the Local PCMCI-lag Causal + Shapley Propagation method.
 ## Quick example
 
 ```python
-from RCAEval.e2e.pcmci_shapley import pcmci_shapley
-from RCAEval.e2e.pcmci_shapley_modules import PCMCIShapleyConfig
+from RCAEval.e2e.cpg_shap import cpg_shap
+from RCAEval.e2e.cpg_shap_modules import CPGShapConfig
 import pandas as pd
 
 # df must include a `time` column and metric columns
-result = pcmci_shapley(
+result = cpg_shap(
     data=df,
     inject_time=inject_time,
     dataset="online-boutique",
-    config=PCMCIShapleyConfig()
+    config=CPGShapConfig()
 )
 print(result["ranks"][0:10])
 ```

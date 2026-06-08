@@ -9,11 +9,11 @@ import time
 from RCAEval.e2e import rca
 from RCAEval.io.time_series import preprocess
 
-from .pcmci_shapley_modules import (
-    PCMCIShapleyConfig,
+from .cpg_shap_modules import (
+    CPGShapConfig,
     preprocessing as prep_mod,
     node_isolation as iso_mod,
-    pcmci_local as pcmci_mod,
+    cpg_shap_local as cpg_shap_local_mod,
     causal_discovery as causal_mod,
     edge_fusion as fuse_mod,
     propagation as prop_mod,
@@ -24,14 +24,14 @@ from .pcmci_shapley_modules import (
 
 
 @rca
-def pcmci_shapley(
+def cpg_shap(
     data: pd.DataFrame,
     inject_time: int | None = None,
     dataset: str | None = None,
     dk_select_useful: bool = False,
     focus_node: str | None = None,
     trace_graph: nx.DiGraph | None = None,
-    config: PCMCIShapleyConfig | None = None,
+    config: CPGShapConfig | None = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """PCMCI-Shapley end-to-end pipeline.
@@ -54,7 +54,7 @@ def pcmci_shapley(
         logger.setLevel(logging.INFO)
         logger.propagate = False  # Avoid duplicate log output
     logger.info("Starting pcmci_shapley pipeline")
-    cfg = config or PCMCIShapleyConfig()
+    cfg = config or CPGShapConfig()
     cfg.validate()
     logger.debug({
         "tau_max": cfg.tau_max,
@@ -92,7 +92,7 @@ def pcmci_shapley(
 
     # 2.5) Pruning: Reduce candidate nodes before expensive operations
     if cfg.enable_pruning:
-        from .pcmci_shapley_modules import pruning as prune_mod
+        from .cpg_shap_modules import pruning as prune_mod
         
         # Get all candidate nodes (service names from metric_mapping)
         all_candidates = list(pp.get("metric_mapping", {}).keys())

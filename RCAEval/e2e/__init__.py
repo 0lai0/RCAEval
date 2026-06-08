@@ -55,7 +55,7 @@ if is_py310():
         pc_randomwalk,
     )
     from .run import run
-    from .pcmci_shapley import pcmci_shapley
+    from .cpg_shap import cpg_shap
     from .mscred import mscred
     from .tracerca import tracerca
 else:

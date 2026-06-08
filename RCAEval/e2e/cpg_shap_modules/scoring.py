@@ -4,7 +4,7 @@ from collections import deque
 import math
 import networkx as nx
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 from .utils import min_max_normalize
 
 
@@ -121,7 +121,7 @@ def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge
     return p
 
 
-def compute_comprehensive_score(shapley_norm: Dict[str, float], reach_norm: Dict[str, float], anomaly_norm: Dict[str, float], cfg: PCMCIShapleyConfig) -> Dict[str, float]:
+def compute_comprehensive_score(shapley_norm: Dict[str, float], reach_norm: Dict[str, float], anomaly_norm: Dict[str, float], cfg: CPGShapConfig) -> Dict[str, float]:
     scores: Dict[str, float] = {}
     for s in shapley_norm.keys():
         scores[s] = cfg.score_alpha1 * shapley_norm.get(s, 0.0) + cfg.score_alpha2 * reach_norm.get(s, 0.0) + cfg.score_alpha3 * anomaly_norm.get(s, 0.0)

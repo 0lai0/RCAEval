@@ -1,8 +1,8 @@
 import pytest
 import pandas as pd
 import numpy as np
-from RCAEval.e2e.pcmci_shapley import pcmci_shapley
-from RCAEval.e2e.pcmci_shapley_modules import PCMCIShapleyConfig
+from RCAEval.e2e.cpg_shap import cpg_shap
+from RCAEval.e2e.cpg_shap_modules import CPGShapConfig
 
 
 def test_parallel_node_isolation():
@@ -19,22 +19,22 @@ def test_parallel_node_isolation():
     })
     
     # Parallel version
-    config_parallel = PCMCIShapleyConfig(
+    config_parallel = CPGShapConfig(
         enable_parallel=True,
         node_isolation_n_jobs=2,
         sampling_rounds=50
     )
     
-    result_parallel = pcmci_shapley(data, config=config_parallel, dataset="test")
+    result_parallel = cpg_shap(data, config=config_parallel, dataset="test")
     
     # Non-parallel version
-    config_serial = PCMCIShapleyConfig(
+    config_serial = CPGShapConfig(
         enable_parallel=False,
         node_isolation_n_jobs=1,
         sampling_rounds=50
     )
     
-    result_serial = pcmci_shapley(data, config=config_serial, dataset="test")
+    result_serial = cpg_shap(data, config=config_serial, dataset="test")
     
     # Results should match
     assert len(result_parallel['ranks']) == len(result_serial['ranks'])
@@ -52,22 +52,22 @@ def test_parallel_shapley_sampling():
     })
     
     # Parallel version
-    config_parallel = PCMCIShapleyConfig(
+    config_parallel = CPGShapConfig(
         enable_parallel=True,
         shapley_n_jobs=2,
         sampling_rounds=200
     )
     
-    result_parallel = pcmci_shapley(data, config=config_parallel, dataset="test")
+    result_parallel = cpg_shap(data, config=config_parallel, dataset="test")
     
     # Non-parallel version
-    config_serial = PCMCIShapleyConfig(
+    config_serial = CPGShapConfig(
         enable_parallel=False,
         shapley_n_jobs=1,
         sampling_rounds=200
     )
     
-    result_serial = pcmci_shapley(data, config=config_serial, dataset="test")
+    result_serial = cpg_shap(data, config=config_serial, dataset="test")
     
     # Results should match
     assert len(result_parallel['ranks']) == len(result_serial['ranks'])
@@ -83,7 +83,7 @@ def test_adaptive_sampling():
     })
     
     # Adaptive sampling
-    config_adaptive = PCMCIShapleyConfig(
+    config_adaptive = CPGShapConfig(
         shapley_method="adaptive",
         adaptive_max_rounds=500,
         adaptive_min_rounds=50,
@@ -91,7 +91,7 @@ def test_adaptive_sampling():
         adaptive_check_interval=25
     )
     
-    result = pcmci_shapley(data, config=config_adaptive, dataset="test")
+    result = cpg_shap(data, config=config_adaptive, dataset="test")
     
     assert 'ranks' in result
     assert len(result['ranks']) > 0
@@ -109,18 +109,18 @@ def test_phase2_performance():
     })
     
     # Phase 1 config
-    config_phase1 = PCMCIShapleyConfig(
+    config_phase1 = CPGShapConfig(
         enable_parallel=False,
         shapley_method="sampling",
         sampling_rounds=200
     )
     
     start = time.time()
-    result1 = pcmci_shapley(data, config=config_phase1, dataset="test")
+    result1 = cpg_shap(data, config=config_phase1, dataset="test")
     time_phase1 = time.time() - start
     
     # Phase 2 config
-    config_phase2 = PCMCIShapleyConfig(
+    config_phase2 = CPGShapConfig(
         enable_parallel=True,
         node_isolation_n_jobs=2,
         shapley_n_jobs=2,
@@ -131,7 +131,7 @@ def test_phase2_performance():
     )
     
     start = time.time()
-    result2 = pcmci_shapley(data, config=config_phase2, dataset="test")
+    result2 = cpg_shap(data, config=config_phase2, dataset="test")
     time_phase2 = time.time() - start
     
     # Phase 2 should be faster

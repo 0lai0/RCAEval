@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from RCAEval.e2e.pcmci_shapley_modules import causal_discovery, PCMCIShapleyConfig
+from RCAEval.e2e.cpg_shap_modules import causal_discovery, CPGShapConfig
 
 
 def generate_sample_data(n_timesteps=300):
@@ -78,7 +78,7 @@ def example1_basic_pcmci():
     print(f"Generated data with {len(df)} timesteps")
     
     # Configure PCMCI
-    config = PCMCIShapleyConfig(
+    config = CPGShapConfig(
         causal_method="pcmci",
         pcmci_alpha=0.05,
         tau_max=3,
@@ -117,13 +117,13 @@ def example2_pc_comparison():
     df = generate_sample_data()
     
     # PCMCI
-    config_pcmci = PCMCIShapleyConfig(causal_method="pcmci", tau_max=3)
+    config_pcmci = CPGShapConfig(causal_method="pcmci", tau_max=3)
     result_pcmci = causal_discovery.discover_causal_graph(
         df, ["service_a", "service_b", "service_c"], config_pcmci, "pcmci"
     )
     
     # PC
-    config_pc = PCMCIShapleyConfig(causal_method="pc")
+    config_pc = CPGShapConfig(causal_method="pc")
     result_pc = causal_discovery.discover_causal_graph(
         df, ["service_a", "service_b", "service_c"], config_pc, "pc"
     )
@@ -153,7 +153,7 @@ def example3_sensitivity_analysis():
     print("-" * 40)
     
     for alpha in alphas:
-        config = PCMCIShapleyConfig(
+        config = CPGShapConfig(
             causal_method="pcmci",
             pcmci_alpha=alpha,
             tau_max=3
@@ -179,7 +179,7 @@ def example4_performance_comparison():
     df = generate_sample_data(n_timesteps=500)
     
     # Test PCMCI
-    config_pcmci = PCMCIShapleyConfig(causal_method="pcmci", tau_max=3)
+    config_pcmci = CPGShapConfig(causal_method="pcmci", tau_max=3)
     start = time.time()
     result_pcmci = causal_discovery.discover_causal_graph(
         df, ["service_a", "service_b", "service_c"], config_pcmci, "pcmci"
@@ -187,7 +187,7 @@ def example4_performance_comparison():
     time_pcmci = time.time() - start
     
     # Test PC
-    config_pc = PCMCIShapleyConfig(causal_method="pc")
+    config_pc = CPGShapConfig(causal_method="pc")
     start = time.time()
     result_pc = causal_discovery.discover_causal_graph(
         df, ["service_a", "service_b", "service_c"], config_pc, "pc"
@@ -205,7 +205,7 @@ def example5_integration_with_pipeline():
     print("Example 5: Integration with PCMCI-Shapley Pipeline")
     print("=" * 60)
     
-    from RCAEval.e2e.pcmci_shapley import pcmci_shapley
+    from RCAEval.e2e.cpg_shap import cpg_shap
     
     # Create sample data with service metrics
     np.random.seed(42)
@@ -221,14 +221,14 @@ def example5_integration_with_pipeline():
     
     # Test with PCMCI
     print("\nRunning with PCMCI method...")
-    config_pcmci = PCMCIShapleyConfig(
+    config_pcmci = CPGShapConfig(
         causal_method="pcmci",
         tau_max=3,
         enable_pruning=False
     )
     
     try:
-        result = pcmci_shapley(
+        result = cpg_shap(
             data=df,
             focus_node="frontend",
             config=config_pcmci
@@ -239,13 +239,13 @@ def example5_integration_with_pipeline():
     
     # Test with PC
     print("\nRunning with PC method...")
-    config_pc = PCMCIShapleyConfig(
+    config_pc = CPGShapConfig(
         causal_method="pc",
         enable_pruning=False
     )
     
     try:
-        result = pcmci_shapley(
+        result = cpg_shap(
             data=df,
             focus_node="frontend",
             config=config_pc

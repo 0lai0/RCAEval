@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 import networkx as nx
 
-from .config import PCMCIShapleyConfig
+from .config import CPGShapConfig
 
 
 def extract_trace_weights(trace_graph: nx.DiGraph | None, local_nodes: List[str]) -> Dict[Tuple[str, str], float]:
@@ -17,7 +17,7 @@ def extract_trace_weights(trace_graph: nx.DiGraph | None, local_nodes: List[str]
     return weights
 
 
-def fuse_edge_weights(trace_w: Dict[Tuple[str, str], float], pcmci_strengths: Dict[Tuple[str, str], float], isolation_scores: Dict[str, float], cfg: PCMCIShapleyConfig) -> Dict[Tuple[str, str], float]:
+def fuse_edge_weights(trace_w: Dict[Tuple[str, str], float], pcmci_strengths: Dict[Tuple[str, str], float], isolation_scores: Dict[str, float], cfg: CPGShapConfig) -> Dict[Tuple[str, str], float]:
     fused: Dict[Tuple[str, str], float] = {}
     nodes = set([i for i, _ in trace_w.keys()] + [j for _, j in trace_w.keys()])
     nodes |= set([i for i, _ in pcmci_strengths.keys()] + [j for _, j in pcmci_strengths.keys()])

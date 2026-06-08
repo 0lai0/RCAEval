@@ -1,11 +1,11 @@
 import pytest
 import pandas as pd
 import numpy as np
-from RCAEval.e2e.pcmci_shapley import pcmci_shapley
-from RCAEval.e2e.pcmci_shapley_modules import PCMCIShapleyConfig
+from RCAEval.e2e.cpg_shap import cpg_shap
+from RCAEval.e2e.cpg_shap_modules import CPGShapConfig
 
 
-def test_pcmci_shapley_with_pruning():
+def test_cpg_shap_with_pruning():
     """Test the full pipeline with pruning enabled."""
     # Build simple test data
     np.random.seed(42)
@@ -18,14 +18,14 @@ def test_pcmci_shapley_with_pruning():
     })
     
     # Config: enable pruning
-    config = PCMCIShapleyConfig(
+    config = CPGShapConfig(
         enable_pruning=True,
         pruning_max_hops=1,
         pruning_min_nodes=2,
         sampling_rounds=100  # Reduce sampling to speed up the test
     )
     
-    result = pcmci_shapley(data, config=config, dataset="test")
+    result = cpg_shap(data, config=config, dataset="test")
     
     assert 'ranks' in result
     assert 'adj' in result
@@ -45,15 +45,15 @@ def test_pruning_reduces_computation():
     })
     
     # Without pruning
-    config_no_prune = PCMCIShapleyConfig(enable_pruning=False, sampling_rounds=50)
+    config_no_prune = CPGShapConfig(enable_pruning=False, sampling_rounds=50)
     start = time.time()
-    result1 = pcmci_shapley(data, config=config_no_prune, dataset="test")
+    result1 = cpg_shap(data, config=config_no_prune, dataset="test")
     time_no_prune = time.time() - start
     
     # With pruning
-    config_prune = PCMCIShapleyConfig(enable_pruning=True, sampling_rounds=50)
+    config_prune = CPGShapConfig(enable_pruning=True, sampling_rounds=50)
     start = time.time()
-    result2 = pcmci_shapley(data, config=config_prune, dataset="test")
+    result2 = cpg_shap(data, config=config_prune, dataset="test")
     time_prune = time.time() - start
     
     # Should be faster
