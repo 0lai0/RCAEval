@@ -1,6 +1,9 @@
-"""
-Unified causal discovery module supporting multiple algorithms.
-Simplifies the causal graph construction process.
+"""Statistical dependency discovery for CPG-Shap.
+
+This module intentionally keeps the historical public API
+(`run_pc`, `run_pcmci`, `discover_causal_graph`) so that external
+call sites do not break, while internally using a single,
+deterministic correlation-based graph construction path.
 """
 from __future__ import annotations
 from typing import Dict, List, Any, Tuple, Literal
@@ -8,9 +11,6 @@ import os
 import numpy as np
 import pandas as pd
 import networkx as nx
-from tigramite import data_processing
-from tigramite.independence_tests.parcorr import ParCorr
-from tigramite.pcmci import PCMCI
 
 from .config import CPGShapConfig
 from .utils import smart_fillna_matrix
@@ -94,55 +94,24 @@ def run_pcmci(
     alpha: float = 0.05,
     max_conds_dim: int | None = 3
 ) -> Dict[str, Any]:
-    """
-    Run PCMCI+ algorithm for time-series causal discovery.
-    
-    Args:
-        X: Input matrix (variables, time)
-        tau_max: Maximum time lag to consider
-        alpha: Significance level for independence tests
-        max_conds_dim: Maximum conditioning set size
-        
-    Returns:
-        Dictionary with p_matrix, val_matrix, and graph
+    """Backward-compatible wrapper for historical PCMCI entrypoint.
+
+    Internally this function now reuses the same correlation graph as `run_pc`,
+    and returns empty lagged statistics tensors for interface compatibility.
     """
     if X.size == 0 or X.shape[0] < 2:
         raise ValueError(f"Insufficient data: shape={X.shape}")
-    
-    if X.shape[1] < tau_max + 2:
-        raise ValueError(f"Time series too short: {X.shape[1]} < {tau_max + 2}")
-    
-    # Clean data
-    X_clean, mask = clean_data_matrix(X)
-    
+    X_clean, _ = clean_data_matrix(X)
     if X_clean.shape[0] < 2:
         raise ValueError(f"Not enough variables after cleaning: {X_clean.shape[0]}")
-    
-    # Adjust max_conds_dim
-    if max_conds_dim is not None:
-        max_conds_dim = min(max_conds_dim, X_clean.shape[0] - 2)
-        max_conds_dim = max(1, max_conds_dim)
-    
-    # Run PCMCI
-    dataframe = data_processing.DataFrame(X_clean)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
-    
-    try:
-        report = pcmci.run_pcmci(
-            tau_max=tau_max,
-            pc_alpha=alpha,
-            max_conds_dim=max_conds_dim
-        )
-    except Exception as e:
-        # Return empty results on failure
-        n_vars = X_clean.shape[0]
-        report = {
-            "p_matrix": np.ones((n_vars, n_vars, tau_max + 1)),
-            "val_matrix": np.zeros((n_vars, n_vars, tau_max + 1)),
-            "graph": np.zeros((n_vars, n_vars))
-        }
-    
-    return report
+
+    graph = _build_correlation_graph(X_clean)
+    n_vars = graph.shape[0]
+    return {
+        "p_matrix": np.ones((n_vars, n_vars, tau_max + 1)),
+        "val_matrix": np.zeros((n_vars, n_vars, tau_max + 1)),
+        "graph": graph,
+    }
 
 
 def run_pc(
@@ -175,68 +144,39 @@ def run_pc(
     if X_clean.shape[0] < 2:
         raise ValueError(f"Not enough variables after cleaning")
     
-    # Use tigramite's PC algorithm on lag-0 only
-    dataframe = data_processing.DataFrame(X_std)
-    pcmci = PCMCI(dataframe=dataframe, cond_ind_test=ParCorr(significance="analytic"), verbosity=0)
-    
-    # Allow environment overrides for sensitivity
-    try:
-        alpha_env = os.environ.get("PC_ALPHA")
-        if alpha_env is not None:
-            alpha = float(alpha_env)
-    except Exception:
-        pass
-    try:
-        mcd_env = os.environ.get("PC_MAXCONDS")
-        if mcd_env is not None:
-            max_conds_dim = int(mcd_env)
-    except Exception:
-        pass
-
-    try:
-        # Run PC algorithm (tau_max=0 means contemporaneous only)
-        results = pcmci.run_pc_stable(
-            pc_alpha=alpha,
-            tau_max=0,
-            max_conds_dim=max_conds_dim
-        )
-        
-        # Extract graph at lag 0
-        graph = results['graph'][:, :, 0]
-        
-    except Exception as e:
-        # Return empty graph on failure
-        n_vars = X_clean.shape[0]
-        graph = np.zeros((n_vars, n_vars))
-    
-    # Fallback: if PC returns empty graph, use correlation thresholding
-    if not np.any(graph):
-        try:
-            thr = float(os.environ.get("CORR_THRESHOLD", "0.2"))
-            topk = int(os.environ.get("CORR_TOPK", "0"))  # 0 means no top-k limit
-        except Exception:
-            thr, topk = 0.2, 0
-        corr = np.corrcoef(X_std)
-        np.fill_diagonal(corr, 0.0)
-        edges_idx = np.argwhere(np.abs(corr) >= thr)
-        # Optionally restrict to top-k absolute correlations per target
-        if topk > 0 and edges_idx.size > 0:
-            graph_fallback = np.zeros_like(corr)
-            n_vars = corr.shape[0]
-            for j in range(n_vars):
-                incoming = [(i, j, abs(corr[i, j])) for i in range(n_vars) if i != j]
-                incoming.sort(key=lambda x: x[2], reverse=True)
-                for i, j2, _s in incoming[:topk]:
-                    graph_fallback[i, j2] = corr[i, j2]
-            graph = graph_fallback
-        else:
-            graph = (np.abs(corr) >= thr).astype(float) * corr
+    graph = _build_correlation_graph(X_std)
 
     return {
         "graph": graph,
         "p_matrix": None,
         "val_matrix": None
     }
+
+
+def _build_correlation_graph(X_std: np.ndarray) -> np.ndarray:
+    """Build directed weighted adjacency from pairwise correlations."""
+    try:
+        thr = float(os.environ.get("CORR_THRESHOLD", "0.2"))
+        topk = int(os.environ.get("CORR_TOPK", "0"))  # 0 means no top-k limit
+    except Exception:
+        thr, topk = 0.2, 0
+
+    corr = np.corrcoef(X_std)
+    np.fill_diagonal(corr, 0.0)
+    edges_idx = np.argwhere(np.abs(corr) >= thr)
+
+    # Optionally restrict to top-k absolute correlations per target
+    if topk > 0 and edges_idx.size > 0:
+        graph = np.zeros_like(corr)
+        n_vars = corr.shape[0]
+        for j in range(n_vars):
+            incoming = [(i, j, abs(corr[i, j])) for i in range(n_vars) if i != j]
+            incoming.sort(key=lambda x: x[2], reverse=True)
+            for i, j2, _ in incoming[:topk]:
+                graph[i, j2] = corr[i, j2]
+        return graph
+
+    return (np.abs(corr) >= thr).astype(float) * corr
 
 
 def extract_edges_and_strengths(

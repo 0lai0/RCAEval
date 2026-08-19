@@ -74,50 +74,69 @@ def compute_temporal_penalty(focus_node: str, anomaly_time: Dict[str, int], edge
     Uses BFS with limited depth instead of enumerating all paths to avoid exponential blow-up.
     """
     p: Dict[str, float] = {s: 1.0 for s in local_nodes}
-    
+
     # Limit search depth to avoid exponential explosion
     max_depth = min(5, len(local_nodes))
-    
+
+    # Precompute successors and node indices once to avoid repeated overhead.
+    node_to_idx = {n: i for i, n in enumerate(local_nodes)}
+    successors = {n: tuple(graph.successors(n)) for n in local_nodes if n in graph}
+
     for s in local_nodes:
         if s == focus_node:
             continue
         if s not in graph:
             continue
-        
+
+        s_idx = node_to_idx.get(s)
+        if s_idx is None:
+            continue
+
         penalty_sum = 0.0
         visited_edges = set()  # Avoid double-counting the same edge
-        
-        # Use BFS with bounded depth
-        queue = deque([(s, [s], 0)])  # (current_node, path, depth)
-        
+
+        # Use BFS with bounded depth.
+        # State: (current_node, visited_mask, depth)
+        queue = deque([(s, 1 << s_idx, 0)])
+
         while queue:
-            node, path, depth = queue.popleft()
-            
+            node, visited_mask, depth = queue.popleft()
+
             if depth > max_depth:
                 continue
-            
-            # Check for temporal violations along the path
-            for u, v in zip(path[:-1], path[1:]):
-                tu = anomaly_time.get(u, None)
-                tv = anomaly_time.get(v, None)
-                if tu is not None and tv is not None and tv < tu:
-                    edge_key = (u, v)
-                    if edge_key not in visited_edges:
-                        penalty_sum += float(edge_strengths.get(edge_key, 0.0))
-                        visited_edges.add(edge_key)
-            
-            # If we reached focus_node, we don't need to expand further
+
+            # If we reached focus_node, we don't need to expand further.
             if node == focus_node:
                 continue
-            
+
             # Continue exploring neighbors
-            for neighbor in graph.successors(node):
-                if neighbor not in path:  # Avoid cycles
-                    queue.append((neighbor, path + [neighbor], depth + 1))
-        
+            for neighbor in successors.get(node, ()):
+                # Preserve old semantics: edges beyond max_depth are not evaluated.
+                if depth >= max_depth:
+                    break
+
+                n_idx = node_to_idx.get(neighbor)
+                if n_idx is None:
+                    continue
+
+                # Avoid cycles (equivalent to `neighbor not in path`)
+                bit = 1 << n_idx
+                if visited_mask & bit:
+                    continue
+
+                # Check temporal violation on this newly traversed edge.
+                edge_key = (node, neighbor)
+                tu = anomaly_time.get(node, None)
+                tv = anomaly_time.get(neighbor, None)
+                if tu is not None and tv is not None and tv < tu and edge_key not in visited_edges:
+                    penalty_sum += float(edge_strengths.get(edge_key, 0.0))
+                    visited_edges.add(edge_key)
+
+                queue.append((neighbor, visited_mask | bit, depth + 1))
+
         # If no violation is found, penalty_sum = 0 and p[s] = 1.0
         p[s] = float(math.exp(-lambda_penalty * penalty_sum)) if penalty_sum > 0 else 1.0
-    
+
     return p
 
 

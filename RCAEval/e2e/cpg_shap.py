@@ -13,7 +13,6 @@ from .cpg_shap_modules import (
     CPGShapConfig,
     preprocessing as prep_mod,
     node_isolation as iso_mod,
-    cpg_shap_local as cpg_shap_local_mod,
     causal_discovery as causal_mod,
     edge_fusion as fuse_mod,
     propagation as prop_mod,
@@ -34,26 +33,26 @@ def cpg_shap(
     config: CPGShapConfig | None = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """PCMCI-Shapley end-to-end pipeline.
+    """CPG-Shap end-to-end pipeline.
 
     Implements the CPG-Shap method by:
     (1) fusing deterministic trace-based topological constraints with
-        probabilistic causal discovery (PC / PCMCI) to build a weighted
-        causal propagation graph over services,
+        statistical dependency signals to build a weighted
+        propagation graph over services,
     (2) simulating discrete-time anomaly propagation on this graph, and
     (3) applying cooperative-game-theoretic Shapley attribution to obtain
         fine-grained, causally-informed root cause rankings.
 
     Returns dict with keys: adj, node_names, ranks.
     """
-    logger = logging.getLogger("pcmci_shapley")
+    logger = logging.getLogger("cpg_shap")
     if not logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         logger.propagate = False  # Avoid duplicate log output
-    logger.info("Starting pcmci_shapley pipeline")
+    logger.info("Starting cpg_shap pipeline")
     cfg = config or CPGShapConfig()
     cfg.validate()
     logger.debug({
@@ -180,16 +179,16 @@ def cpg_shap(
     
     try:
         # Use unified causal discovery interface
-        pcmci_res = causal_mod.discover_causal_graph(
+        dep_res = causal_mod.discover_causal_graph(
             service_df, 
             list(service_df.columns), 
             cfg,
             method=cfg.causal_method
         )
-        logger.info(f"Causal edges (var-level): {len(pcmci_res['edges'])}")
+        logger.info(f"Dependency edges (var-level): {len(dep_res['edges'])}")
     except Exception as e:
         logger.warning(f"Causal discovery failed: {e}. Using empty causal graph.")
-        pcmci_res = {
+        dep_res = {
             'edges': [],
             'edge_strengths': {},
             'columns': list(service_df.columns)
@@ -198,23 +197,23 @@ def cpg_shap(
 
     # Map variable-level indices back to service names (combine by prefix)
     # Create a service graph and strengths aggregated by (service_i, service_j)
-    cols = pcmci_res["columns"]
+    cols = dep_res["columns"]
     var_to_service = {idx: col for idx, col in enumerate(cols)}
 
     agg_strengths: Dict[tuple[str, str], float] = {}
-    for (i, j), s in pcmci_res["edge_strengths"].items():
+    for (i, j), s in dep_res["edge_strengths"].items():
         si, sj = var_to_service.get(i), var_to_service.get(j)
         if si is None or sj is None or si == sj:
             continue
         key = (si, sj)
         agg_strengths[key] = max(agg_strengths.get(key, 0.0), float(s))
 
-    pcmci_edges_svc = list(agg_strengths.keys())
+    dep_edges_svc = list(agg_strengths.keys())
 
     # 7) Edge fusion
     trace_w = fuse_mod.extract_trace_weights(trace_graph, U)
     fused = fuse_mod.fuse_edge_weights(trace_w, agg_strengths, I_scores, cfg)
-    fused = fuse_mod.apply_conflict_penalty(fused, pcmci_edges_svc, cfg.gamma)
+    fused = fuse_mod.apply_conflict_penalty(fused, dep_edges_svc, cfg.gamma)
     norm_w = fuse_mod.normalize_incoming_weights(fused, U)
     logger.info(f"Fused edges: raw={len(fused)} normalized={len(norm_w)} trace_edges={len(trace_w)}")
     t5 = time.time(); logger.info(f"TIMER edge_fusion: {(t5 - t4):.3f}s")
@@ -333,5 +332,5 @@ def cpg_shap(
         "shapley_values": shapley,
         "local_graph": G,
     }
-    logger.info("pcmci_shapley pipeline completed")
+    logger.info("cpg_shap pipeline completed")
     return result
